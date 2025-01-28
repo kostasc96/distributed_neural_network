@@ -1,0 +1,11 @@
+*.pyc
+*.idea
+*.DS_Store
+ __pycache__/
+*.dtd
+Lib/
+Include/
+Scripts/
+data/
+datasets/
+.ipynb_checkpoints/

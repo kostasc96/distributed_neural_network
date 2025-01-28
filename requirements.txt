@@ -1,0 +1,10 @@
+setuptools
+torch
+torchvision
+networkx
+pandas
+scikit-learn
+numpy
+matplotlib
+jupyter
+notebook

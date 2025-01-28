@@ -1,0 +1,25 @@
+services:
+  python-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./:/app
+      - ./datasets:/app/datasets
+      - ./code:/app/code   # Mounting the 'code' folder
+    working_dir: /app
+    stdin_open: true
+    tty: true
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./:/app
+      - ./datasets:/app/datasets  # Mounting the 'datasets' folder
+      - ./code:/app/code   # Mounting the 'code' folder
+    working_dir: /app
