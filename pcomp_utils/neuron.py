@@ -1,27 +1,13 @@
-from pcomp.activation_functions import activation_fns
+import numpy as np
+from pcomp.activation_functions import ACTIVATIONS, relu
 
 class Neuron:
-    def __init__(self, neuron_id, weights, bias, activation):
-        self.neuron_id = neuron_id  # Unique ID for this neuron
-        self.weights = weights
-        self.bias = bias
-        self.activation = activation
-        self.activated_by = []  # List of neuron IDs that activate this neuron
-        self.activates = []     # List of neuron IDs that this neuron activates
-
-    def activate(self, inputs):
-        """
-        Activate the neuron based on its inputs, weights, and bias.
-        Apply the specified activation function to the weighted sum.
-        """
-        z = sum(w * i for w, i in zip(self.weights, inputs)) + self.bias
-        return self.apply_activation(z)
-
-    def apply_activation(self, z):
-        """
-        Apply the activation function to the input value (z).
-        """
-        if self.activation in activation_fns.keys():
-            return activation_fns[self.activation](z)
-        else:
-            return z  # Identity function if no activation is defined
+    def __init__(self, weights, bias, activation, is_final_layer=False):
+        self.weights = np.array(weights)
+        self.bias = np.array(bias)
+        self.activation_func = None if is_final_layer else ACTIVATIONS.get(activation, relu)
+        self.is_final_layer = is_final_layer
+    
+    def forward(self, inputs):
+        z = np.dot(self.weights, inputs) + self.bias
+        return z if self.is_final_layer else self.activation_func(z)

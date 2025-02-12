@@ -1,16 +1,14 @@
-import math
+import numpy as np
 
-activation_fns = {}
-activation_fn = lambda f: activation_fns.setdefault(f.__name__, f)
-
-@activation_fn
+# Activation functions
 def relu(x):
-    return max(0, x)
+    return np.maximum(0, x)
 
-@activation_fn
-def sigmoid(x):
-    return 1 / (1 + math.exp(-x))
+def softmax(x):
+    e_x = np.exp(x - np.max(x))  # Stability trick to prevent overflow
+    return e_x / e_x.sum()
 
-@activation_fn
-def tanh(x):
-    return math.tanh(x)
+ACTIVATIONS = {
+    "relu": relu,
+    "softmax": softmax
+}
