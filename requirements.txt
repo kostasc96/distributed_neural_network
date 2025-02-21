@@ -8,3 +8,4 @@ numpy
 matplotlib
 jupyter
 notebook
+redis
