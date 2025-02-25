@@ -1,3 +1,5 @@
+version: '3.9'
+
 services:
   python-dev:
     build:
@@ -6,10 +8,14 @@ services:
     volumes:
       - ./:/app
       - ./datasets:/app/datasets
-      - ./code:/app/code   # Mounting the 'code' folder
+      - ./code:/app/code  # Mounting the 'code' folder
     working_dir: /app
     stdin_open: true
     tty: true
+    environment:
+      KAFKA_BROKER: "host.docker.internal:9092"  # External Kafka connection
+    networks:
+      - default  # Use the default network
 
   jupyter:
     build:
@@ -23,3 +29,7 @@ services:
       - ./datasets:/app/datasets  # Mounting the 'datasets' folder
       - ./code:/app/code   # Mounting the 'code' folder
     working_dir: /app
+    environment:
+      KAFKA_BROKER: "host.docker.internal:9092"  # External Kafka connection
+    networks:
+      - default  # Use the default network
