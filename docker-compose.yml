@@ -13,9 +13,9 @@ services:
     stdin_open: true
     tty: true
     environment:
-      KAFKA_BROKER: "host.docker.internal:9092"  # External Kafka connection
+      KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
     networks:
-      - default  # Use the default network
+      - kafka_docker_kafka_docker_kafka-network  # Connect to Kafka's network
 
   jupyter:
     build:
@@ -30,6 +30,10 @@ services:
       - ./code:/app/code   # Mounting the 'code' folder
     working_dir: /app
     environment:
-      KAFKA_BROKER: "host.docker.internal:9092"  # External Kafka connection
+      KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
     networks:
-      - default  # Use the default network
+      - kafka_docker_kafka_docker_kafka-network  # Connect to Kafka's network
+
+networks:
+  kafka_docker_kafka_docker_kafka-network:
+    external: true  # Ensure it connects to Kafka's network
