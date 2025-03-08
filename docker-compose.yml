@@ -15,7 +15,7 @@ services:
     environment:
       KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
     networks:
-      - kafka_docker_kafka_docker_kafka-network  # Connect to Kafka's network
+      - kafka_docker_kafka-network  # Connect to Kafka's network
 
   jupyter:
     build:
@@ -32,8 +32,8 @@ services:
     environment:
       KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
     networks:
-      - kafka_docker_kafka_docker_kafka-network  # Connect to Kafka's network
+      - kafka_docker_kafka-network  # Connect to Kafka's network
 
 networks:
-  kafka_docker_kafka_docker_kafka-network:
+  kafka_docker_kafka-network:
     external: true  # Ensure it connects to Kafka's network
