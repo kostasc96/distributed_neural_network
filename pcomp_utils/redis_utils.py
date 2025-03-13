@@ -1,23 +1,22 @@
 import redis
+import numpy as np
 
 class RedisHandler:
-    def __init__(self, host: str, port: int, db):
-        self.client = redis.Redis(host=host, port=port, db=db)
-
-    def get_client(self):
-        return self.client
+    def __init__(self, host, port, db):
+        self.client = redis.Redis(host, port, db)
 
     def set(self, key, value):
-        self.client.set(key, value)
+        self.client.set(key, value.astype(np.float32).tobytes())
 
-    def hset(self, hash_name, key, value):
-        self.client.hset(hash_name, key, value)
+    def get(self, key):
+        data = self.client.get(key)
+        if data:
+            return np.frombuffer(data, dtype=np.float32)
+        print(f"⚠️ No data found in Redis for key: {key}")
+        return None
 
-    def get_all(self, key):
+    def hset(self, key, field, value):
+        self.client.hset(key, field, value)
+
+    def hgetall(self, key):
         return self.client.hgetall(key)
-
-    def hgetall(self, hash_name):
-        return self.client.hgetall(hash_name)
-
-    def delete(self, key):
-        self.client.delete(key)
