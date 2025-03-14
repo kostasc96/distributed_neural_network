@@ -1,4 +1,4 @@
-from kafka import KafkaConsumer, TopicPartition
+from kafka import KafkaConsumer, TopicPartition, OffsetAndMetadata
 from json import loads
 
 class KafkaConsumerHandler:
@@ -19,6 +19,10 @@ class KafkaConsumerHandler:
     def consume(self):
         for message in self.consumer:
             yield message
+    
+    def commit(self, topic, partition, offset):
+        tp = TopicPartition(topic, partition)
+        self.consumer.commit({tp: OffsetAndMetadata(offset, None)})
 
     def close(self):
         self.consumer.close()
