@@ -35,3 +35,6 @@ class RedisHandler:
     
     def delete(self, key):
         self.client.delete(key)
+    
+    def expire(self, key, seconds=10):
+        self.client.expire(key, seconds)
