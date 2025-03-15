@@ -7,7 +7,7 @@ class RedisHandler:
 
     def set(self, key, value, to_bytes=True):
         if to_bytes:
-            self.client.set(key, value.astype(np.float32).tobytes())
+            self.client.set(key, value.astype(np.float64).tobytes())
         else:
             self.client.set(key, value)
 
@@ -15,7 +15,7 @@ class RedisHandler:
         data = self.client.get(key)
         if data:
             if from_bytes:
-                return np.frombuffer(data, dtype=np.float32)
+                return np.frombuffer(data, dtype=np.float64)
             else:
                 return data
         print(f"⚠️ No data found in Redis for key: {key}")
@@ -26,3 +26,9 @@ class RedisHandler:
 
     def hgetall(self, key):
         return self.client.hgetall(key)
+    
+    def sadd(self, key, value):
+        self.client.sadd(key, value)
+    
+    def scard(self, key):
+        return self.client.scard(key)
