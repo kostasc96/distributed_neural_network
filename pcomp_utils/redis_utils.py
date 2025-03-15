@@ -5,11 +5,12 @@ class RedisHandler:
     def __init__(self, host, port, db):
         self.client = redis.Redis(host, port, db)
 
-    def set(self, key, value, to_bytes=True):
+    def set(self, key, value, to_bytes=True, seconds=15):
         if to_bytes:
             self.client.set(key, value.astype(np.float64).tobytes())
         else:
             self.client.set(key, value)
+        self.client.expire(key, seconds)
 
     def get(self, key, from_bytes=True):
         data = self.client.get(key)
