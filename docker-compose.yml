@@ -20,19 +20,19 @@ services:
   jupyter:
     build:
       context: .
-      dockerfile: Dockerfile
-    command: python -m notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
+      dockerfile: Dockerfile_2
+    command: bash -c "jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
     ports:
       - "8888:8888"
     volumes:
       - ./:/app
-      - ./datasets:/app/datasets  # Mounting the 'datasets' folder
-      - ./code:/app/code   # Mounting the 'code' folder
+      - ./datasets:/app/datasets
+      - ./code:/app/code
     working_dir: /app
     environment:
-      KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
+      KAFKA_BROKER: "kafka:29092"
     networks:
-      - kafka_docker_kafka-network  # Connect to Kafka's network
+      - kafka_docker_kafka-network
 
 networks:
   kafka_docker_kafka-network:

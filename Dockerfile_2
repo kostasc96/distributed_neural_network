@@ -1,0 +1,32 @@
+FROM openjdk:11-slim
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl gnupg2 git python3-pip python3-dev libzmq3-dev && \
+    apt-get clean
+
+# Install Scala and sbt
+RUN echo "deb https://repo.scala-sbt.org/scalasbt/debian all main" | tee /etc/apt/sources.list.d/sbt.list && \
+    curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x99E82A75642AC823" | apt-key add && \
+    apt-get update && apt-get install -y scala sbt
+
+# Install Python packages and Jupyter
+RUN pip3 install --upgrade pip && pip3 install notebook
+
+# Install Almond (Scala Kernel for Jupyter)
+RUN SCALA_VERSION=2.13.12 ALMOND_VERSION=0.13.0 && \
+    curl -Lo coursier https://git.io/coursier-cli && chmod +x coursier && ./coursier launch --fork almond -- --install
+
+# Copy the build files and resolve dependencies
+COPY build.sbt /app/build.sbt
+COPY . /app
+WORKDIR /app
+
+# Pre-fetch sbt dependencies
+RUN sbt compile
+
+# Expose the notebook port
+EXPOSE 8888
+
+# Start Jupyter notebook
+CMD ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=''", "--NotebookApp.password=''"]
