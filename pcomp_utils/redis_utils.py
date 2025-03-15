@@ -32,3 +32,6 @@ class RedisHandler:
     
     def scard(self, key):
         return self.client.scard(key)
+    
+    def delete(self, key):
+        self.client.delete(key)
