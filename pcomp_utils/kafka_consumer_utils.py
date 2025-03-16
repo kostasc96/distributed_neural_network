@@ -21,6 +21,9 @@ class KafkaConsumerHandler:
         for message in self.consumer:
             yield message
     
+    def poll(self, seconds=0.5):
+        return self.consumer.poll(seconds)
+    
     def commit(self, topic, partition, offset):
         tp = TopicPartition(topic, partition)
         self.consumer.commit({tp: OffsetAndMetadata(offset, None)})
