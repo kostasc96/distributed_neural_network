@@ -6,8 +6,9 @@ class KafkaConsumerHandler:
         self.consumer = KafkaConsumer(
             bootstrap_servers=servers,
             value_deserializer=lambda m: loads(m.decode('utf-8')),
+            #group_id='dummy_group',
             auto_offset_reset='latest',
-            enable_auto_commit=True,
+            enable_auto_commit=False,
             consumer_timeout_ms=60000
         )
         if partition is not None:

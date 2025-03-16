@@ -5,7 +5,9 @@ class KafkaProducerHandler:
     def __init__(self, server):
         self.producer = KafkaProducer(
             bootstrap_servers=server,
-            value_serializer=lambda v: dumps(v).encode('utf-8')
+            value_serializer=lambda v: dumps(v).encode('utf-8'),
+            acks='all',
+            retries=5
         )
 
     def send(self, topic, message, partition=None):
