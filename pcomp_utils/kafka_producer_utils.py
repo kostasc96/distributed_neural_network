@@ -7,7 +7,9 @@ class KafkaProducerHandler:
             bootstrap_servers=server,
             value_serializer=lambda v: dumps(v).encode('utf-8'),
             acks='all',
-            retries=5
+            retries=5,
+            linger_ms=50,      # Delay to allow batching
+            batch_size=16384   # Increase batch size as needed
         )
 
     def send(self, topic, message, partition=None):
@@ -18,4 +20,5 @@ class KafkaProducerHandler:
         self.producer.flush()
 
     def close(self):
+        self.producer.flush()
         self.producer.close()
