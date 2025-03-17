@@ -1,24 +1,20 @@
-from pcomp.neuron import Neuron
-from pcomp.layer import Layer
+from numba import njit
 
-def build_layer(layer_data, neuron_start_id, previous_layer=None):
-    """
-    Construct a Layer object from the model data for a specific layer.
-    Establish relationships (activated_by and activates) between neurons in
-    the current and previous layers.
-    """
-    neurons = []
-    for idx, (weights, bias) in enumerate(zip(layer_data["weights"], layer_data["biases"])):
-        neuron_id = neuron_start_id + idx
-        activation = layer_data["activation"]
-        neuron = Neuron(neuron_id, weights, bias, activation)
-        neurons.append(neuron)
+@njit
+def compute_z(inputs, weights, bias):
+    s = 0.0
+    for i in range(len(inputs)):
+        s += inputs[i] * weights[i]
+    return s + bias
 
-    # If there is a previous layer, establish relationships
-    if previous_layer:
-        for prev_neuron in previous_layer.neurons:
-            for curr_neuron in neurons:
-                prev_neuron.activates.append(curr_neuron.neuron_id)
-                curr_neuron.activated_by.append(prev_neuron.neuron_id)
+@njit
+def relu_numba(x):
+    return x if x > 0.0 else 0.0
 
-    return Layer(neurons), neuron_start_id + len(neurons)
+@njit
+def process_data_numba(inputs, weights, bias, isFinal):
+    z = compute_z(inputs, weights, bias)
+    if isFinal:
+        return z
+    else:
+        return relu_numba(z)

@@ -1,12 +1,8 @@
 setuptools
-torch
-torchvision
-networkx
-pandas
-scikit-learn
 numpy
-matplotlib
 jupyter
 notebook
 redis
 kafka-python
+numba
+confluent-kafka
