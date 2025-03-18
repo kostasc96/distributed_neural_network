@@ -6,3 +6,4 @@ redis
 kafka-python
 numba
 confluent-kafka
+flatbuffers
