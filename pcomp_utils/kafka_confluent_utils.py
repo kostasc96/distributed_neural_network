@@ -2,9 +2,9 @@ import flatbuffers
 import time
 import json
 from confluent_kafka import Producer
-from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING
-from pcomp_utils.NeuronMessage import NeuronMessage
-from pcomp_utils.LayerMessage import LayerMessage
+from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END
+from pcomp_utils.NeuronMessage import NeuronMessage, NeuronMessageStart, NeuronMessageAddNeuronId, NeuronMessageAddImageId, NeuronMessageAddOutput, NeuronMessageEnd
+from pcomp_utils.LayerMessage import LayerMessage, LayerMessageStart, LayerMessageAddLayer, LayerMessageAddImageId, LayerMessageEnd
 
 class KafkaProducerHandler:
     def __init__(self, server):
@@ -13,36 +13,45 @@ class KafkaProducerHandler:
             'acks': 'all',
             'retries': 5,
             'linger.ms': 50,
-            'batch.size': 16384
+            'batch.size': 65536,
+            'compression.type': 'lz4'  
         })
+    
+
+    def delivery_report(self, err, msg):
+        if err is not None:
+            print(f'Message delivery failed: {err}')
+
     
     def send_neuron_message(self, topic, neuron_id, image_id, output_hex, partition):
         # Build a Neuron message using FlatBuffers
         builder = flatbuffers.Builder(1024)
         output_offset = builder.CreateString(output_hex)
-        NeuronMessage.NeuronMessageStart(builder)
-        NeuronMessage.NeuronMessageAddNeuronId(builder, neuron_id)
-        NeuronMessage.NeuronMessageAddImageId(builder, image_id)
-        NeuronMessage.NeuronMessageAddOutput(builder, output_offset)
-        neuron_msg = NeuronMessage.NeuronMessageEnd(builder)
+        NeuronMessageStart(builder)
+        NeuronMessageAddNeuronId(builder, neuron_id)
+        NeuronMessageAddImageId(builder, image_id)
+        NeuronMessageAddOutput(builder, output_offset)
+        neuron_msg = NeuronMessageEnd(builder)
         builder.Finish(neuron_msg)
         buf = bytes(builder.Output())
-        self.producer.produce(topic, value=buf, partition=partition)
-        self.producer.flush()
+        self.producer.produce(topic, value=buf, partition=partition, callback=self.delivery_report)
+        self.producer.poll(0)
+        #self.producer.flush()
 
     
     def send_layer_message(self, topic, layer, image_id, partition):
         # Build a Layer message using FlatBuffers
         builder = flatbuffers.Builder(1024)
         layer_offset = builder.CreateString(layer)
-        LayerMessage.LayerMessageStart(builder)
-        LayerMessage.LayerMessageAddLayer(builder, layer_offset)
-        LayerMessage.LayerMessageAddImageId(builder, image_id)
-        layer_msg = LayerMessage.LayerMessageEnd(builder)
+        LayerMessageStart(builder)
+        LayerMessageAddLayer(builder, layer_offset)
+        LayerMessageAddImageId(builder, image_id)
+        layer_msg = LayerMessageEnd(builder)
         builder.Finish(layer_msg)
         buf = bytes(builder.Output())
-        self.producer.produce(topic, value=buf, partition=partition)
-        self.producer.flush()
+        self.producer.produce(topic, value=buf, partition=partition, callback=self.delivery_report)
+        self.producer.poll(0)
+        #self.producer.flush()
     
 
     def send(self, topic, message, partition=None):
@@ -63,10 +72,13 @@ class KafkaConsumerHandler:
             'bootstrap.servers': servers,
             'group.id': group_id,
             'auto.offset.reset': 'latest',
-            'enable.auto.commit': True
+            'enable.auto.commit': False,
+            'fetch.min.bytes': 1048576,
+            'fetch.wait.max.ms': 100,
+            'max.partition.fetch.bytes': 10485760
         })
         if partition is not None:
-            tp = TopicPartition(topic, partition, OFFSET_BEGINNING)
+            tp = TopicPartition(topic, partition, OFFSET_END)
             self.consumer.assign([tp])
         else:
             self.consumer.subscribe([topic])
@@ -76,7 +88,6 @@ class KafkaConsumerHandler:
         while True:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
-                # Exit if no messages have been received for break_after seconds.
                 if time.time() - last_message_time >= break_after:
                     break
                 continue
@@ -87,10 +98,10 @@ class KafkaConsumerHandler:
                 else:
                     print(msg.error())
                     break
-            buf = msg.value()
-            # Parse the binary data as a NeuronMessage
-            neuron = NeuronMessage.GetRootAsNeuronMessage(buf, 0)
+            neuron = NeuronMessage.GetRootAsNeuronMessage(msg.value(), 0)
             yield neuron
+            self.consumer.commit()
+
 
     def consume_layer_messages(self, poll_timeout=0.5, break_after=20):
         last_message_time = time.time()
@@ -108,9 +119,10 @@ class KafkaConsumerHandler:
                     print(msg.error())
                     break
             buf = msg.value()
-            # Parse the binary data as a LayerMessage
+            self.consumer.commit(msg)
             layer = LayerMessage.GetRootAsLayerMessage(buf, 0)
             yield layer
+            self.consumer.commit()
     
     def consume(self, poll_timeout=0.5, break_after=20):
         last_message_time = time.time()
@@ -124,6 +136,9 @@ class KafkaConsumerHandler:
             # Reset timer on receiving a message
             last_message_time = time.time()
             yield json.loads(msg.value().decode("utf-8"))
+            self.consumer.commit()
 
     def close(self):
-        self.consumer.close()
+        if self.consumer is not None:
+            self.consumer.close()
+            self.consumer = None
