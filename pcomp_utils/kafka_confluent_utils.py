@@ -137,6 +137,9 @@ class KafkaConsumerHandler:
             last_message_time = time.time()
             yield json.loads(msg.value().decode("utf-8"))
             self.consumer.commit(msg)
+    
+    def commit(self):
+        self.consumer.commit()
 
     def close(self):
         if self.consumer is not None:
