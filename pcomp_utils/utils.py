@@ -18,3 +18,10 @@ def process_data_numba(inputs, weights, bias, isFinal):
         return z
     else:
         return relu_numba(z)
+
+@njit
+def aggregate(local_outputs, neuron_count):
+    result = np.empty(neuron_count, dtype=np.float64)
+    for neuron_id in range(neuron_count):
+        result[neuron_id] = local_outputs[neuron_id]
+    return result

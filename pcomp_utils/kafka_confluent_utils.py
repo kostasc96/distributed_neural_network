@@ -100,7 +100,7 @@ class KafkaConsumerHandler:
                     break
             neuron = NeuronMessage.GetRootAsNeuronMessage(msg.value(), 0)
             yield neuron
-            self.consumer.commit()
+            self.consumer.commit(msg)
 
 
     def consume_layer_messages(self, poll_timeout=0.5, break_after=20):
@@ -122,7 +122,7 @@ class KafkaConsumerHandler:
             self.consumer.commit(msg)
             layer = LayerMessage.GetRootAsLayerMessage(buf, 0)
             yield layer
-            self.consumer.commit()
+            self.consumer.commit(msg)
     
     def consume(self, poll_timeout=0.5, break_after=20):
         last_message_time = time.time()
@@ -136,7 +136,7 @@ class KafkaConsumerHandler:
             # Reset timer on receiving a message
             last_message_time = time.time()
             yield json.loads(msg.value().decode("utf-8"))
-            self.consumer.commit()
+            self.consumer.commit(msg)
 
     def close(self):
         if self.consumer is not None:
