@@ -1,6 +1,4 @@
-import flatbuffers
 import time
-import json
 from confluent_kafka import Producer
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END
 from pcomp_utils.NeuronMessage import NeuronMessage, NeuronMessageStart, NeuronMessageAddNeuronId, NeuronMessageAddImageId, NeuronMessageAddOutput, NeuronMessageEnd
@@ -21,41 +19,10 @@ class KafkaProducerHandler:
     def delivery_report(self, err, msg):
         if err is not None:
             print(f'Message delivery failed: {err}')
-
-    
-    def send_neuron_message(self, topic, neuron_id, image_id, output_hex, partition):
-        # Build a Neuron message using FlatBuffers
-        builder = flatbuffers.Builder(1024)
-        output_offset = builder.CreateString(output_hex)
-        NeuronMessageStart(builder)
-        NeuronMessageAddNeuronId(builder, neuron_id)
-        NeuronMessageAddImageId(builder, image_id)
-        NeuronMessageAddOutput(builder, output_offset)
-        neuron_msg = NeuronMessageEnd(builder)
-        builder.Finish(neuron_msg)
-        buf = bytes(builder.Output())
-        self.producer.produce(topic, value=buf, partition=partition, callback=self.delivery_report)
-        self.producer.poll(0)
-        #self.producer.flush()
-
-    
-    def send_layer_message(self, topic, layer, image_id, partition):
-        # Build a Layer message using FlatBuffers
-        builder = flatbuffers.Builder(1024)
-        layer_offset = builder.CreateString(layer)
-        LayerMessageStart(builder)
-        LayerMessageAddLayer(builder, layer_offset)
-        LayerMessageAddImageId(builder, image_id)
-        layer_msg = LayerMessageEnd(builder)
-        builder.Finish(layer_msg)
-        buf = bytes(builder.Output())
-        self.producer.produce(topic, value=buf, partition=partition, callback=self.delivery_report)
-        self.producer.poll(0)
-        #self.producer.flush()
     
 
     def send(self, topic, message, partition=None):
-        value = json.dumps(message).encode('utf-8')
+        value = message.encode('utf-8')
         if partition is not None:
             self.producer.produce(topic, value=value, partition=partition)
         else:
@@ -83,47 +50,6 @@ class KafkaConsumerHandler:
         else:
             self.consumer.subscribe([topic])
     
-    def consume_neuron_messages(self, poll_timeout=0.5, break_after=20):
-        last_message_time = time.time()
-        while True:
-            msg = self.consumer.poll(poll_timeout)
-            if msg is None:
-                if time.time() - last_message_time >= break_after:
-                    break
-                continue
-            last_message_time = time.time()
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    continue
-                else:
-                    print(msg.error())
-                    break
-            neuron = NeuronMessage.GetRootAsNeuronMessage(msg.value(), 0)
-            yield neuron
-            self.consumer.commit(msg)
-
-
-    def consume_layer_messages(self, poll_timeout=0.5, break_after=20):
-        last_message_time = time.time()
-        while True:
-            msg = self.consumer.poll(poll_timeout)
-            if msg is None:
-                if time.time() - last_message_time >= break_after:
-                    break
-                continue
-            last_message_time = time.time()
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    continue
-                else:
-                    print(msg.error())
-                    break
-            buf = msg.value()
-            self.consumer.commit(msg)
-            layer = LayerMessage.GetRootAsLayerMessage(buf, 0)
-            yield layer
-            self.consumer.commit(msg)
-    
     def consume(self, poll_timeout=0.5, break_after=20):
         last_message_time = time.time()
         while True:
@@ -135,7 +61,7 @@ class KafkaConsumerHandler:
                 continue
             # Reset timer on receiving a message
             last_message_time = time.time()
-            yield json.loads(msg.value().decode("utf-8"))
+            yield msg.value().decode("utf-8")
             self.consumer.commit(msg)
     
     def commit(self):
