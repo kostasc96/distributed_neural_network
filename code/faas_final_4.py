@@ -39,10 +39,12 @@ class Neuron(threading.Thread):
 
     def process_and_send(self, image_id, input_data):
         output = self.process_data(input_data)
-        output_str = format(output, '.17g')
-        msg = f"{self.neuron_id}|{image_id}|{output_str}"
+        msg = {
+            'neuron_id': self.neuron_id,
+            'image_id': image_id,
+            'output': output.astype(np.float64).tobytes().hex()
+        }
         self.producer.send(f'layer-{self.layer_id_num}-complete', msg, self.layer_id_num)
-        #self.producer.send(f'requests-responses', 'www.neuron.example')
 
     def run(self):
         # Instantiate Kafka consumer and producer inside the thread.
@@ -54,9 +56,8 @@ class Neuron(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str = message.split('|')
-                if layer == self.layer_id:
-                    image_id = int(image_id_str)
+                if message.get('layer') == self.layer_id:
+                    image_id = message.get('image_id')
                     input_data = self.fetch_input(image_id)
                     if input_data is not None:
                         self.executor.submit(self.process_and_send, image_id, input_data)
@@ -90,10 +91,10 @@ class LayerCoordinator(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                neuron_id, image_id, output_str = message.split('|')
-                neuron_id = int(neuron_id)
-                image_id = int(image_id)
-                output = np.float64(output_str)
+                image_id = message.get('image_id')
+                neuron_id = message.get('neuron_id')
+                output_hex = message.get('output')
+                output = np.frombuffer(bytes.fromhex(output_hex), dtype=np.float64)[0]
                 if image_id not in self.completed_neurons:
                     self.completed_neurons[image_id] = set()
                     self.outputs[image_id] = {}
@@ -130,8 +131,7 @@ class LayerCoordinator(threading.Thread):
 
     def activate_next_layer(self, image_id):
         next_layer = f'layer_{self.layer_id_num + 1}'
-        self.producer.send('activate-layer', f"{next_layer}|{image_id}", self.layer_id_num + 1)
-        #self.producer.send(f'requests-responses', 'www.layercoordinator.example')
+        self.producer.send('activate-layer', {'layer': next_layer, 'image_id': image_id}, self.layer_id_num + 1)
             
 
 class Layer(threading.Thread):
@@ -148,8 +148,7 @@ class Layer(threading.Thread):
             self.executor.submit(self.send_activation, neuron_id, image_id)
 
     def send_activation(self, neuron_id, image_id):
-        self.producer.send(f'layer-{self.layer_id_num}', f"{self.layer_id}|{image_id}", neuron_id)
-        #self.producer.send(f'requests-responses', 'www.layer.example')
+        self.producer.send(f'layer-{self.layer_id_num}', {'layer': self.layer_id, 'image_id': image_id}, neuron_id)
 
     def run(self):
         consumer = KafkaConsumerHandler('activate-layer', KAFKA_BROKER, self.layer_id_num)
@@ -160,9 +159,8 @@ class Layer(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str = message.split('|')
-                if layer == self.layer_id:
-                    image_id = int(image_id_str)
+                if message.get('layer') == self.layer_id:
+                    image_id = message.get('image_id')
                     self.activate_neurons(image_id)
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
@@ -180,7 +178,6 @@ def store_initial_input_data(image_np, image_id):
 def activate_network(image_id):
     producer = KafkaProducerHandler(KAFKA_BROKER)
     producer.send('activate-layer', {'layer': 'layer_0', 'image_id': image_id}, 0)
-    #self.producer.send(f'requests-responses', 'www.layer.example')
     print(f"🚀 Initial activation sent to activate-layer for layer_0 and image {image_id}")
     producer.close()
 
@@ -210,8 +207,6 @@ for thread in neurons + coordinators:
 
 print("Threads finished")
 
-
-import redis
 
 # Connect to Redis
 r = RedisHandler('host.docker.internal', 6379, 0)
