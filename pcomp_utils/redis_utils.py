@@ -21,6 +21,14 @@ class RedisHandler:
                 return data
         print(f"⚠️ No data found in Redis for key: {key}")
         return None
+    
+    def get_batch(self, key, batch_size, columns_size):
+        data = self.client.get(key)
+        if data:
+            return np.frombuffer(data, dtype=np.float64).reshape(batch_size, columns_size)
+        print(f"⚠️ No data found in Redis for key: {key}")
+        return None
+        
 
     def hset(self, key, field, value):
         self.client.hset(key, field, value)
@@ -33,6 +41,9 @@ class RedisHandler:
     
     def scard(self, key):
         return self.client.scard(key)
+    
+    def pipeline(self):
+        return self.client.pipeline()
     
     def delete(self, key):
         self.client.delete(key)

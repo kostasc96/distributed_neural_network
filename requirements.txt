@@ -4,6 +4,5 @@ jupyter
 notebook
 redis
 kafka-python
-numba
 confluent-kafka
 minio

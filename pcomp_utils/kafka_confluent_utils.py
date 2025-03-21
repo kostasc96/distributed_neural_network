@@ -1,8 +1,6 @@
 import time
 from confluent_kafka import Producer
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END
-from pcomp_utils.NeuronMessage import NeuronMessage, NeuronMessageStart, NeuronMessageAddNeuronId, NeuronMessageAddImageId, NeuronMessageAddOutput, NeuronMessageEnd
-from pcomp_utils.LayerMessage import LayerMessage, LayerMessageStart, LayerMessageAddLayer, LayerMessageAddImageId, LayerMessageEnd
 
 class KafkaProducerHandler:
     def __init__(self, server):
