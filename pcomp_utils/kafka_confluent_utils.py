@@ -1,6 +1,6 @@
 import time
 from confluent_kafka import Producer
-from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END
+from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END, KafkaException
 
 class KafkaProducerHandler:
     def __init__(self, server):
@@ -33,6 +33,7 @@ class KafkaProducerHandler:
 
 class KafkaConsumerHandler:
     def __init__(self, topic, servers, group_id='default_group', partition=None):
+        self.topic = topic
         self.consumer = Consumer({
             'bootstrap.servers': servers,
             'group.id': group_id,
@@ -57,6 +58,17 @@ class KafkaConsumerHandler:
                 if time.time() - last_message_time >= break_after:
                     break
                 continue
+            if msg.error():
+                if msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                    metadata = self.consumer.list_topics(self.topic)
+                    partitions = [p.id for p in metadata.topics[self.topic].partitions.values()]
+                    topic_partitions = [TopicPartition(self.topic, partition) for partition in partitions]
+                    self.consumer.assign(topic_partitions)
+                    self.consumer.seek_to_end()
+                    end_offsets = self.consumer.position(topic_partitions)
+                    self.consumer.commit(offsets=end_offsets, asynchronous=False)
+                else:
+                    raise KafkaException(msg.error())
             # Reset timer on receiving a message
             last_message_time = time.time()
             yield msg.value().decode("utf-8")
