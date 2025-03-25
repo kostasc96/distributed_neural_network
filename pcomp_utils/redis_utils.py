@@ -40,10 +40,6 @@ class RedisHandler:
                 arrays.append(np.frombuffer(blob, dtype=np.float64).reshape(batch_size, columns_size))
             else:
                 arrays.append(np.zeros((batch_size, columns_size)))  # fallback
-        del_pipe = self.client.pipeline()
-        for key in keys:
-            del_pipe.unlink(key)
-        del_pipe.execute()
         return np.squeeze(np.stack(arrays, axis=1))
 
         
@@ -64,6 +60,19 @@ class RedisHandler:
     
     def delete(self, key):
         self.client.delete(key)
+    
+    def delete_batch_keys(self, batch_id):
+        pattern = f"batch:{batch_id}:*"
+        cursor = 0
+        while True:
+            cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=1000)
+            if keys:
+                self.client.delete(*keys)
+            if cursor == 0:
+                break
+    
+    def hdel(self, h, f):
+        self.client.delete(h, f)
     
     def expire(self, key, seconds=10):
         self.client.expire(key, seconds)
