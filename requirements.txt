@@ -6,3 +6,4 @@ redis
 kafka-python
 confluent-kafka
 minio
+pybind11

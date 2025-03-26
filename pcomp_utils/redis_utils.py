@@ -45,6 +45,9 @@ class RedisHandler:
         
     def hset(self, key, field, value):
         self.client.hset(key, field, value)
+    
+    def hset_bulk(self, key, values):
+        self.client.hset(key, mapping=values)
 
     def hgetall(self, key):
         return self.client.hgetall(key)

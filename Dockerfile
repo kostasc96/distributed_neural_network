@@ -1,6 +1,16 @@
 # Use a Python base image
 FROM python:3.9-slim
 
+# Install system build essentials and Eigen
+RUN apt-get update && apt-get install -y build-essential libeigen3-dev
+
+# Install system build essentials (recommended for compiling)
+RUN apt-get update && apt-get install -y build-essential
+
+# Install pybind11 and build tooling BEFORE build
+RUN pip install --upgrade pip
+RUN pip install pybind11 wheel setuptools
+
 # Set working directory
 WORKDIR /app
 
@@ -15,11 +25,8 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY pcomp_utils/ ./pcomp_utils/
 COPY setup.py .
 
-# Install the build module
-RUN pip install --no-cache-dir build
-
-# Build the wheel from setup.py
-RUN python -m build --wheel
+# ✅ Directly build the wheel without isolated environment (so it sees pybind11)
+RUN python setup.py bdist_wheel
 
 # Install the built wheel package
 RUN pip install --no-cache-dir dist/*.whl
