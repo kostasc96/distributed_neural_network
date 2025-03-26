@@ -29,17 +29,15 @@ class RedisHandler:
         print(f"⚠️ No data found in Redis for key: {key}")
         return None
     
-    def get_batch_multi(self, keys, batch_size, columns_size=1):
-        pipe = self.client.pipeline()
-        for key in keys:
-            pipe.get(key)
-        blobs = pipe.execute()
+    def get_batch_multi(self, keys, batch_size):
+        results = self.client.mget(keys)
         arrays = []
-        for blob in blobs:
-            if blob:
-                arrays.append(np.frombuffer(blob, dtype=np.float64).reshape(batch_size, columns_size))
+        for res in results:
+            if res is not None:
+                arr = np.frombuffer(res, dtype=np.float64).reshape(batch_size, 1)
+                arrays.append(arr)
             else:
-                arrays.append(np.zeros((batch_size, columns_size)))  # fallback
+                arrays.append(np.zeros((batch_size, 1), dtype=np.float64))
         return np.squeeze(np.stack(arrays, axis=1))
 
         
