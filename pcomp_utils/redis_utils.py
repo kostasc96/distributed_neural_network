@@ -72,6 +72,16 @@ class RedisHandler:
             if cursor == 0:
                 break
     
+    def delete_streams_keys(self, image_id):
+        pattern = f"streams:{image_id}:*"
+        cursor = 0
+        while True:
+            cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=1000)
+            if keys:
+                self.client.delete(*keys)
+            if cursor == 0:
+                break
+    
     def hdel(self, h, f):
         self.client.delete(h, f)
     
