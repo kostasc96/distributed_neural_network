@@ -1,6 +1,8 @@
 import time
 from confluent_kafka import Producer
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END, KafkaException
+from queue import Queue, Empty
+import threading
 
 class KafkaProducerHandler:
     def __init__(self, server):
@@ -48,15 +50,15 @@ class KafkaConsumerHandler:
             self.consumer.assign([tp])
         else:
             self.consumer.subscribe([topic])
+        self.msg_queue = Queue()
+        self.running = True
+        self.poll_thread = threading.Thread(target=self._poll_messages, daemon=True)
+        self.poll_thread.start()
     
-    def consume(self, poll_timeout=0.5, break_after=20):
-        last_message_time = time.time()
-        while True:
+    def _poll_messages(self, poll_timeout=0.5):
+        while self.running:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
-                # Check if 20 seconds have passed since the last message
-                if time.time() - last_message_time >= break_after:
-                    break
                 continue
             if msg.error():
                 if msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
@@ -69,15 +71,28 @@ class KafkaConsumerHandler:
                     self.consumer.commit(offsets=end_offsets, asynchronous=False)
                 else:
                     raise KafkaException(msg.error())
-            # Reset timer on receiving a message
-            last_message_time = time.time()
-            yield msg.value().decode("utf-8")
-            self.consumer.commit(msg)
+            else:
+                message_str = msg.value().decode("utf-8")
+                self.msg_queue.put(message_str)
+                self.consumer.commit(msg)
+
+    def consume(self, break_after=20):
+        last_message_time = time.time()
+        while True:
+            try:
+                message = self.msg_queue.get(timeout=0.5)
+                last_message_time = time.time()
+                yield message
+            except Empty:
+                if time.time() - last_message_time >= break_after:
+                    break
     
     def commit(self):
         self.consumer.commit()
 
     def close(self):
+        self.running = False
+        self.poll_thread.join()
         if self.consumer is not None:
             self.consumer.close()
             self.consumer = None
