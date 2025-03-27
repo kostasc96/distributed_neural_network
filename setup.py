@@ -1,9 +1,20 @@
-import setuptools
+from setuptools import setup, find_packages, Extension
+import pybind11
 
-src_packages = setuptools.find_packages(where="pcomp_utils")
+src_packages = find_packages(where="pcomp_utils")
 REQUIREMENTS = [i.strip() for i in open("requirements.txt").readlines()]
 
-setuptools.setup(
+ext_modules = [
+    Extension(
+        "pcomp.neuroncalc",  # this places it inside pcomp
+        ["pcomp_utils/neuroncalc.cpp"],
+        include_dirs=[pybind11.get_include()],
+        language="c++",
+        extra_compile_args=["-O3", "-march=native"],
+    )
+]
+
+setup(
     name="pcomp", #package_name
     version="0.1",
     author="pcomp",
@@ -20,5 +31,6 @@ setuptools.setup(
     include_package_data=True,
     install_requires=REQUIREMENTS,
     package_dir={"pcomp": "pcomp_utils"},  #top-level folder -> pcomp (mapping to pcomp_utils)
-    package_data={"pcomp": ["*"]}
+    package_data={"pcomp": ["*"]},
+    ext_modules=ext_modules
 )

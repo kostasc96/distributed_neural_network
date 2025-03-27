@@ -2,11 +2,16 @@ import json
 import numpy as np
 import threading
 import time
-#import pandas as pd
+import io
 from concurrent.futures import ThreadPoolExecutor
-from pcomp_utils.kafka_confluent_utils import KafkaProducerHandler, KafkaConsumerHandler
-from pcomp_utils.activation_functions import ACTIVATIONS, relu, softmax
-from pcomp_utils.redis_utils import RedisHandler
+from pcomp.kafka_confluent_utils import KafkaProducerHandler, KafkaConsumerHandler
+from pcomp.activation_functions import ACTIVATIONS, relu, softmax
+from pcomp.redis_utils import RedisHandler
+from pcomp.minio_utils import MinioClient
+from pcomp.utils import batch_generator
+from pcomp import neuroncalc
+from base64 import b64encode, b64decode
+
 
 # Kafka Configuration
 KAFKA_BROKER = 'kafka:9092'
@@ -26,22 +31,26 @@ class Neuron(threading.Thread):
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.producer = None
 
-    def fetch_input(self, image_id):
-        key = f"streams:{image_id}:initial_data" if self.layer_id == 'layer_0' else f"streams:{image_id}:{self.layer_id_num - 1}"
+    def fetch_input(self, batch_id, batch_size, columns_size):
+        key = f"batch:{batch_id}:initial_data" if self.layer_id == 'layer_0' else f"batch:{batch_id}:layer_{int(self.layer_id[-1]) - 1}"
         # Poll Redis until the data is available.
         while True:
-            data = self.redis_handler.get(key)
+            data = np.frombuffer(self.redis_handler.get(key), dtype=np.float64).reshape(-1, int(columns_size))
             if data is not None:
                 return data
+            print(f"⏳ Neuron {self.neuron_id} waiting for input data for key: {key}")
 
-    def process_data(self, inputs):
-        z = np.dot(inputs, self.weights) + self.bias
-        return z if self.is_final_layer else self.activation_func(z)
-
-    def process_and_send(self, image_id, input_data):
-        output = self.process_data(input_data)
-        output_str = format(output, '.17g')
-        msg = f"{self.neuron_id}|{image_id}|{output_str}"
+    def process_and_send(self, batch_id, batch_size, columns_size):
+        input_data = self.fetch_input(batch_id, batch_size, columns_size)
+        # z = np.dot(input_data, self.weights) + self.bias
+        # output = z if self.is_final_layer else self.activation_func(z)
+        activation_fn = "None" if self.is_final_layer else self.activation
+        output = neuroncalc.compute_neuron_output_batch(
+            input_data, self.weights, self.bias,
+            activation_fn
+        )
+        #self.redis_handler.set(f"batch:{batch_id}:n_{self.layer_id_num}_{self.neuron_id}", output, True, 1000)
+        msg = f"{self.neuron_id}|{batch_id}|{batch_size}|{columns_size}|{b64encode(output.tobytes()).decode('utf-8')}"
         self.producer.send(f'layer-{self.layer_id_num}-complete', msg, self.layer_id_num)
         #self.producer.send(f'requests-responses', 'www.neuron.example')
 
@@ -55,12 +64,10 @@ class Neuron(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str = message.split('|')
+                layer, batch_id_str, batch_size, columns_size = message.split('|')
                 if layer == self.layer_id:
-                    image_id = int(image_id_str)
-                    input_data = self.fetch_input(image_id)
-                    if input_data is not None:
-                        self.executor.submit(self.process_and_send, image_id, input_data)
+                    batch_id = int(batch_id_str)
+                    self.executor.submit(self.process_and_send, batch_id, batch_size, columns_size)
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
@@ -76,6 +83,7 @@ class LayerCoordinator(threading.Thread):
         self.layer_id_num = int(self.layer_id.replace("layer_", ""))
         self.neuron_count = neuron_count
         self.is_final_layer = is_final_layer
+        #self.batch_keys = {}
         self.outputs = {}
         self.completed_count = {}
         self.redis_handler = RedisHandler('host.docker.internal', 6379, 0)
@@ -91,21 +99,23 @@ class LayerCoordinator(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                neuron_id, image_id, output_str = message.split('|')
+                neuron_id, batch_id, batch_size, columns_size, arr_base64_str = message.split('|')
                 neuron_id = int(neuron_id)
-                image_id = int(image_id)
-                output = np.float64(output_str)
-                if image_id not in self.outputs:
-                    self.outputs[image_id] = [None] * self.neuron_count
-                    self.completed_count[image_id] = 0
-                if self.outputs[image_id][neuron_id] is None:
-                    self.outputs[image_id][neuron_id] = output
-                    self.completed_count[image_id] += 1
-                if self.completed_count[image_id] == self.neuron_count:
-                    local_outputs = self.outputs[image_id].copy()
-                    self.executor.submit(self.aggregate_neuron_outputs, image_id, local_outputs)
-                    del self.outputs[image_id]
-                    del self.completed_count[image_id]
+                batch_id = int(batch_id)
+                arr_bytes = b64decode(arr_base64_str)
+                output = np.frombuffer(arr_bytes, dtype=np.float64)
+                if batch_id not in self.outputs:
+                    self.outputs[batch_id] = [None] * self.neuron_count
+                    self.completed_count[batch_id] = 0
+                if self.outputs[batch_id][neuron_id] is None:
+                    self.outputs[batch_id][neuron_id] = output
+                    self.completed_count[batch_id] += 1
+                if self.completed_count[batch_id] == self.neuron_count:
+                    batch_size = int(batch_size)
+                    columns_size = int(columns_size)
+                    self.aggregate_neuron_outputs(batch_id, batch_size, columns_size)
+                    del self.outputs[batch_id]
+                    del self.completed_count[batch_id]
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
@@ -113,22 +123,24 @@ class LayerCoordinator(threading.Thread):
                 break
             time.sleep(0.05)
 
-    def aggregate_neuron_outputs(self, image_id, local_outputs):
-        if not self.is_final_layer:
-            self.activate_next_layer(image_id)
-        outputs = np.array(local_outputs, dtype=np.float64)
+    def aggregate_neuron_outputs(self, batch_id, batch_size, columns_size):
+        #outputs = self.redis_handler.get_batch_multi(self.batch_keys[batch_id], batch_size)
+        outputs = np.squeeze(np.stack(self.outputs[batch_id], axis=1))
         # Store the aggregated result in Redis.
-        self.redis_handler.set(f"streams:{image_id}:{self.layer_id_num}", outputs)
-        if self.is_final_layer:
-            prediction = int(np.argmax(outputs))
-            self.redis_handler.hset('streams:predictions', image_id, prediction)
-            self.redis_handler.delete(f"streams:{image_id}")
-            self.redis_handler.delete_streams_keys(image_id)
+        if not self.is_final_layer:
+            self.redis_handler.set(f"batch:{batch_id}:{self.layer_id}", outputs, True, 1000)
+            self.activate_next_layer(batch_id, batch_size, columns_size)
+        else:
+            preds = np.argmax(outputs, axis=1)
+            cnt = batch_id * int(batch_size)
+            mapping = {idx + cnt: int(prediction) for idx, prediction in enumerate(preds)}
+            self.redis_handler.hset_bulk("batch:predictions", mapping)
+            self.redis_handler.delete_batch_keys(batch_id)
 
-    def activate_next_layer(self, image_id):
+    def activate_next_layer(self, batch_id, batch_size, columns_size):
         next_layer = f'layer_{self.layer_id_num + 1}'
-        self.producer.send('activate-layer', f"{next_layer}|{image_id}", self.layer_id_num + 1)
-        #self.producer.send(f'requests-responses', 'www.layercoordinator.example')
+        self.producer.send('activate-layer', f"{next_layer}|{batch_id}|{batch_size}|{self.neuron_count}", self.layer_id_num + 1)
+        self.producer.send(f'requests-responses', 'www.layercoordinator.example')
             
 
 class Layer(threading.Thread):
@@ -140,12 +152,12 @@ class Layer(threading.Thread):
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.producer = None
 
-    def activate_neurons(self, image_id):
+    def activate_neurons(self, batch_id, batch_size, columns_size):
         for neuron_id in range(self.neuron_count):
-            self.executor.submit(self.send_activation, neuron_id, image_id)
+            self.executor.submit(self.send_activation, neuron_id, batch_id, batch_size, columns_size)
 
-    def send_activation(self, neuron_id, image_id):
-        self.producer.send(f'layer-{self.layer_id_num}', f"{self.layer_id}|{image_id}", neuron_id)
+    def send_activation(self, neuron_id, batch_id, batch_size, columns_size):
+        self.producer.send(f'layer-{self.layer_id_num}', f"{self.layer_id}|{batch_id}|{batch_size}|{columns_size}", neuron_id)
         #self.producer.send(f'requests-responses', 'www.layer.example')
 
     def run(self):
@@ -157,10 +169,10 @@ class Layer(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str = message.split('|')
+                layer, batch_id_str, batch_size, columns_size = message.split('|')
                 if layer == self.layer_id:
-                    image_id = int(image_id_str)
-                    self.activate_neurons(image_id)
+                    batch_id = int(batch_id_str)
+                    self.activate_neurons(batch_id, batch_size, columns_size)
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
@@ -168,17 +180,16 @@ class Layer(threading.Thread):
                 break
             time.sleep(0.05)
 
-def store_initial_input_data(image_np, image_id):
-    redis_handler = RedisHandler('host.docker.internal', 6379, 0)
-    key = f"initial_data:{image_id}"
-    redis_handler.set(key, image_np)
-    print(f"📥 Initial input data stored in Redis.")
-
-def activate_network(image_id):
+def predict_data():
+    batch_size = 100
     producer = KafkaProducerHandler(KAFKA_BROKER)
-    producer.send('activate-layer', {'layer': 'layer_0', 'image_id': image_id}, 0)
-    #self.producer.send(f'requests-responses', 'www.layer.example')
-    print(f"🚀 Initial activation sent to activate-layer for layer_0 and image {image_id}")
+    redis_handler = RedisHandler('host.docker.internal', 6379, 0)
+    file = MinioClient("host.docker.internal:9000", "admin", "admin123").get_object("my-bucket", "mnist.csv")
+    data = np.genfromtxt(io.StringIO(file.read().decode('utf-8')), delimiter=',', skip_header=1)
+    features = data[:, :-1][:500]
+    for idx, batch in enumerate(batch_generator(features, batch_size), start=0):
+        redis_handler.set(f"batch:{idx}:initial_data", batch, True, 1000)
+        producer.send('activate-layer', f"layer_0|{idx}|{batch_size}|784", 0)
     producer.close()
 
 # Load network and dataset
@@ -200,36 +211,4 @@ for thread in neurons + layers + coordinators:
 
 print("Threads started")
 
-
-# Wait for all threads to complete
-for thread in neurons + coordinators:
-    thread.join()
-
-print("Threads finished")
-
-
-import redis
-
-# Connect to Redis
-r = RedisHandler('host.docker.internal', 6379, 0)
-
-# Get hashes from Redis
-images_label = r.hgetall('images_label')
-predictions = r.hgetall('predictions')
-
-# Decode bytes to string
-images_label = {k.decode(): v.decode() for k, v in images_label.items()}
-predictions = {k.decode(): v.decode() for k, v in predictions.items()}
-
-# Calculate accuracy
-correct = 0
-total = len(images_label)
-
-for field, label_val in images_label.items():
-    pred_val = predictions.get(field, None)
-    if pred_val == label_val:
-        correct += 1
-
-accuracy = (correct / total) * 100 if total > 0 else 0
-
-print(f'Accuracy: {accuracy:.2f}% ({correct}/{total})')
+predict_data()
