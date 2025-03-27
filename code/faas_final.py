@@ -19,6 +19,7 @@ class Neuron(threading.Thread):
         self.neuron_id = neuron_id
         self.weights = np.array(weights)
         self.bias = np.array(bias)
+        self.activation = activation
         self.activation_func = ACTIVATIONS.get(activation, relu)
         self.is_final_layer = is_final_layer
         self.redis_handler = RedisHandler('host.docker.internal', 6379, 0)
@@ -26,7 +27,7 @@ class Neuron(threading.Thread):
         self.producer = None
 
     def fetch_input(self, image_id):
-        key = f"initial_data:{image_id}" if self.layer_id == 'layer_0' else f"layer_{int(self.layer_id[-1]) - 1}_{image_id}"
+        key = f"streams:{image_id}:initial_data" if self.layer_id == 'layer_0' else f"streams:{image_id}:{self.layer_id_num - 1}"
         # Poll Redis until the data is available.
         while True:
             data = self.redis_handler.get(key)
@@ -75,8 +76,8 @@ class LayerCoordinator(threading.Thread):
         self.layer_id_num = int(self.layer_id.replace("layer_", ""))
         self.neuron_count = neuron_count
         self.is_final_layer = is_final_layer
-        self.completed_neurons = {}
         self.outputs = {}
+        self.completed_count = {}
         self.redis_handler = RedisHandler('host.docker.internal', 6379, 0)
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.producer = None
@@ -94,17 +95,17 @@ class LayerCoordinator(threading.Thread):
                 neuron_id = int(neuron_id)
                 image_id = int(image_id)
                 output = np.float64(output_str)
-                if image_id not in self.completed_neurons:
-                    self.completed_neurons[image_id] = set()
-                    self.outputs[image_id] = {}
-                self.completed_neurons[image_id].add(neuron_id)
-                self.outputs[image_id][neuron_id] = output
-
-                if len(self.completed_neurons[image_id]) == self.neuron_count:
+                if image_id not in self.outputs:
+                    self.outputs[image_id] = [None] * self.neuron_count
+                    self.completed_count[image_id] = 0
+                if self.outputs[image_id][neuron_id] is None:
+                    self.outputs[image_id][neuron_id] = output
+                    self.completed_count[image_id] += 1
+                if self.completed_count[image_id] == self.neuron_count:
                     local_outputs = self.outputs[image_id].copy()
                     self.executor.submit(self.aggregate_neuron_outputs, image_id, local_outputs)
-                    del self.completed_neurons[image_id]
                     del self.outputs[image_id]
+                    del self.completed_count[image_id]
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
@@ -115,18 +116,14 @@ class LayerCoordinator(threading.Thread):
     def aggregate_neuron_outputs(self, image_id, local_outputs):
         if not self.is_final_layer:
             self.activate_next_layer(image_id)
-        #outputs = np.array([local_outputs.get(neuron_id) for neuron_id in range(self.neuron_count)])
-        outputs = np.fromiter(
-            (local_outputs[neuron_id] for neuron_id in range(self.neuron_count)),
-            dtype=np.float64,
-            count=self.neuron_count
-        )
+        outputs = np.array(local_outputs, dtype=np.float64)
         # Store the aggregated result in Redis.
-        self.redis_handler.set(f"{self.layer_id}_{image_id}", outputs)
+        self.redis_handler.set(f"streams:{image_id}:{self.layer_id_num}", outputs)
         if self.is_final_layer:
             prediction = int(np.argmax(outputs))
-            self.redis_handler.hset('predictions', image_id, prediction)
-            self.redis_handler.delete(f"initial_data:{image_id}")
+            self.redis_handler.hset('streams:predictions', image_id, prediction)
+            self.redis_handler.delete(f"streams:{image_id}")
+            self.redis_handler.delete_streams_keys(image_id)
 
     def activate_next_layer(self, image_id):
         next_layer = f'layer_{self.layer_id_num + 1}'
