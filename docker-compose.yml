@@ -14,8 +14,10 @@ services:
     tty: true
     environment:
       KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
+      NVIDIA_VISIBLE_DEVICES: "0"
     networks:
       - kafka_docker_kafka-network  # Connect to Kafka's network
+    gpus: all
 
   jupyter:
     build:
@@ -31,8 +33,10 @@ services:
     working_dir: /app
     environment:
       KAFKA_BROKER: "kafka:29092"  # Using Kafka's internal Docker network
+      NVIDIA_VISIBLE_DEVICES: "0"
     networks:
       - kafka_docker_kafka-network  # Connect to Kafka's network
+    gpus: all
 
 networks:
   kafka_docker_kafka-network:
