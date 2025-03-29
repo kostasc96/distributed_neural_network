@@ -50,7 +50,7 @@ class KafkaConsumerHandler:
             self.consumer.assign([tp])
         else:
             self.consumer.subscribe([topic])
-        self.msg_queue = FastQueue()
+        self.msg_queue = FastQueue(maxsize=10000)
         self.running = True
         self.poll_thread = threading.Thread(target=self._poll_messages, daemon=True)
         self.poll_thread.start()
@@ -73,6 +73,8 @@ class KafkaConsumerHandler:
                     raise KafkaException(msg.error())
             else:
                 message_str = msg.value().decode("utf-8")
+                if self.msg_queue.size() >= self.msg_queue._maxsize:
+                    print("Queue is full — waiting to enqueue Kafka message")
                 self.msg_queue.enqueue(message_str)
                 self.consumer.commit(msg)
 

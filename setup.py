@@ -16,9 +16,21 @@ ext_modules = [
     )
 ]
 ext_modules += cythonize(
-    "pcomp_utils/fast_queue.pyx",
+    Extension(
+        "pcomp.fast_queue",
+        ["pcomp_utils/fast_queue.pyx"]
+    ),
     compiler_directives={"language_level": "3"}
 )
+ext_modules += cythonize(
+    Extension(
+        "pcomp.parser",
+        ["pcomp_utils/parser.pyx"]
+    ),
+    compiler_directives={"language_level": "3"}
+)
+
+
 
 setup(
     name="pcomp", #package_name
