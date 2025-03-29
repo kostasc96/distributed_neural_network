@@ -2,11 +2,12 @@ import json
 import numpy as np
 import threading
 import time
-#import pandas as pd
+from base64 import b64encode, b64decode
 from concurrent.futures import ThreadPoolExecutor
-from pcomp_utils.kafka_confluent_utils import KafkaProducerHandler, KafkaConsumerHandler
-from pcomp_utils.activation_functions import ACTIVATIONS, relu, softmax
-from pcomp_utils.redis_utils import RedisHandler
+from pcomp.kafka_utils import KafkaProducerHandler, KafkaConsumerHandler
+from pcomp.activation_functions import ACTIVATIONS, relu, softmax
+from pcomp.redis_utils import RedisHandler
+from pcomp.parser import parse_layer_coordinator_message, parse_layer_message
 
 # Kafka Configuration
 KAFKA_BROKER = 'kafka:9092'
@@ -22,17 +23,8 @@ class Neuron(threading.Thread):
         self.activation = activation
         self.activation_func = ACTIVATIONS.get(activation, relu)
         self.is_final_layer = is_final_layer
-        self.redis_handler = RedisHandler('host.docker.internal', 6379, 0)
-        self.executor = ThreadPoolExecutor(max_workers=4)
         self.producer = None
-
-    def fetch_input(self, image_id):
-        key = f"streams:{image_id}:initial_data" if self.layer_id == 'layer_0' else f"streams:{image_id}:{self.layer_id_num - 1}"
-        # Poll Redis until the data is available.
-        while True:
-            data = self.redis_handler.get(key)
-            if data is not None:
-                return data
+        
 
     def process_data(self, inputs):
         z = np.dot(inputs, self.weights) + self.bias
@@ -42,31 +34,30 @@ class Neuron(threading.Thread):
         output = self.process_data(input_data)
         output_str = format(output, '.17g')
         msg = f"{self.neuron_id}|{image_id}|{output_str}"
-        self.producer.send(f'layer-{self.layer_id_num}-complete', msg, self.layer_id_num)
+        self.producer.send(msg, self.layer_id_num)
         #self.producer.send(f'requests-responses', 'www.neuron.example')
 
     def run(self):
         # Instantiate Kafka consumer and producer inside the thread.
         consumer = KafkaConsumerHandler(f'layer-{self.layer_id_num}', KAFKA_BROKER, partition=self.neuron_id)
-        self.producer = KafkaProducerHandler(KAFKA_BROKER)
+        self.producer = KafkaProducerHandler(KAFKA_BROKER, f'layer-{self.layer_id_num}-complete')
         last_msg_time = time.time()
         while True:
             got_message = False
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str = message.split('|')
+                layer, image_id_str, input_str = message.split('|')
+                image_id = int(image_id_str)
+                arr_bytes = b64decode(input_str)
+                input_data = np.frombuffer(arr_bytes, dtype=np.float64)
                 if layer == self.layer_id:
-                    image_id = int(image_id_str)
-                    input_data = self.fetch_input(image_id)
-                    if input_data is not None:
-                        self.executor.submit(self.process_and_send, image_id, input_data)
+                    self.process_and_send(image_id, input_data)
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
                 self.producer.close()
                 break
-            time.sleep(0.05)
 
 
 class LayerCoordinator(threading.Thread):
@@ -84,17 +75,18 @@ class LayerCoordinator(threading.Thread):
 
     def run(self):
         consumer = KafkaConsumerHandler(f'layer-{self.layer_id_num}-complete', KAFKA_BROKER, self.layer_id_num)
-        self.producer = KafkaProducerHandler(KAFKA_BROKER)
+        self.producer = KafkaProducerHandler(KAFKA_BROKER, 'activate-layer')
         last_msg_time = time.time()
         while True:
             got_message = False
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                neuron_id, image_id, output_str = message.split('|')
-                neuron_id = int(neuron_id)
-                image_id = int(image_id)
-                output = np.float64(output_str)
+                #neuron_id, image_id, output_str = message.split('|')
+                msg = parse_layer_coordinator_message(message)
+                neuron_id = msg.neuron_id
+                image_id = msg.image_id
+                output = msg.output
                 if image_id not in self.outputs:
                     self.outputs[image_id] = [None] * self.neuron_count
                     self.completed_count[image_id] = 0
@@ -111,7 +103,6 @@ class LayerCoordinator(threading.Thread):
                 consumer.close()
                 self.producer.close()
                 break
-            time.sleep(0.05)
 
     def aggregate_neuron_outputs(self, image_id, local_outputs):
         if not self.is_final_layer:
@@ -127,7 +118,7 @@ class LayerCoordinator(threading.Thread):
 
     def activate_next_layer(self, image_id):
         next_layer = f'layer_{self.layer_id_num + 1}'
-        self.producer.send('activate-layer', f"{next_layer}|{image_id}", self.layer_id_num + 1)
+        self.producer.send(f"{next_layer}|{image_id}", self.layer_id_num + 1)
         #self.producer.send(f'requests-responses', 'www.layercoordinator.example')
             
 
@@ -137,36 +128,44 @@ class Layer(threading.Thread):
         self.layer_id = layer_id
         self.neuron_count = neuron_count
         self.layer_id_num = int(self.layer_id.replace("layer_", ""))
-        self.executor = ThreadPoolExecutor(max_workers=8)
         self.producer = None
+        self.redis_handler = RedisHandler('host.docker.internal', 6379, 0)
+
+    def fetch_input(self, image_id):
+        key = f"streams:{image_id}:initial_data" if self.layer_id == 'layer_0' else f"streams:{image_id}:{self.layer_id_num - 1}"
+        # Poll Redis until the data is available.
+        while True:
+            data = self.redis_handler.get(key)
+            if data is not None:
+                return data
 
     def activate_neurons(self, image_id):
+        input_data = self.fetch_input(image_id)
+        input_str = b64encode(input_data.tobytes()).decode('utf-8')
         for neuron_id in range(self.neuron_count):
-            self.executor.submit(self.send_activation, neuron_id, image_id)
-
-    def send_activation(self, neuron_id, image_id):
-        self.producer.send(f'layer-{self.layer_id_num}', f"{self.layer_id}|{image_id}", neuron_id)
-        #self.producer.send(f'requests-responses', 'www.layer.example')
+            self.producer.send(f"{self.layer_id}|{image_id}|{input_str}", neuron_id)
 
     def run(self):
         consumer = KafkaConsumerHandler('activate-layer', KAFKA_BROKER, self.layer_id_num)
-        self.producer = KafkaProducerHandler(KAFKA_BROKER)
+        self.producer = KafkaProducerHandler(KAFKA_BROKER, f'layer-{self.layer_id_num}')
         last_msg_time = time.time()
         while True:
             got_message = False
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str = message.split('|')
+                #layer, image_id_str = message.split('|')
+                msg = parse_layer_message(message)
+                layer = msg.layer
+                image_id= msg.image_id
                 if layer == self.layer_id:
-                    image_id = int(image_id_str)
+                    #image_id = int(image_id_str)
                     self.activate_neurons(image_id)
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
                 self.producer.close()
                 break
-            time.sleep(0.05)
 
 def store_initial_input_data(image_np, image_id):
     redis_handler = RedisHandler('host.docker.internal', 6379, 0)
