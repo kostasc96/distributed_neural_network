@@ -1,5 +1,7 @@
 from setuptools import setup, find_packages, Extension
 import pybind11
+from Cython.Build import cythonize
+import os
 
 src_packages = find_packages(where="pcomp_utils")
 REQUIREMENTS = [i.strip() for i in open("requirements.txt").readlines()]
@@ -13,6 +15,10 @@ ext_modules = [
         extra_compile_args=["-O3", "-march=native"],
     )
 ]
+ext_modules += cythonize(
+    "pcomp_utils/fast_queue.pyx",
+    compiler_directives={"language_level": "3"}
+)
 
 setup(
     name="pcomp", #package_name

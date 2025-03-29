@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y build-essential
 
 # Install pybind11 and build tooling BEFORE build
 RUN pip install --upgrade pip
-RUN pip install pybind11 wheel setuptools
+RUN pip install pybind11 wheel setuptools cython
 
 # Set working directory
 WORKDIR /app
