@@ -3,7 +3,6 @@ numpy
 jupyter
 notebook
 redis
-kafka-python
 confluent-kafka
 minio
 pybind11
