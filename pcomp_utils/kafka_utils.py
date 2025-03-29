@@ -12,9 +12,10 @@ class KafkaProducerHandler:
             'bootstrap.servers': server,
             'acks': 'all',
             'retries': 5,
-            'linger.ms': 50,
-            'batch.size': 65536,
-            'compression.type': 'lz4'  
+            'linger.ms': 100,
+            'batch.size': 131072,
+            'compression.type': 'lz4'  ,
+            'socket.send.buffer.bytes': 1048576
         })
     
 
@@ -55,7 +56,8 @@ class KafkaConsumerHandler:
             'enable.auto.commit': False,
             'fetch.min.bytes': 1048576,
             'fetch.wait.max.ms': 100,
-            'max.partition.fetch.bytes': 10485760
+            'max.partition.fetch.bytes': 10485760,
+            'socket.receive.buffer.bytes': 1048576
         })
         if partition is not None:
             tp = TopicPartition(topic, partition, OFFSET_END)
@@ -68,6 +70,9 @@ class KafkaConsumerHandler:
         self.poll_thread.start()
     
     def _poll_messages(self, poll_timeout=0.5):
+        messages_since_commit = 0
+        commit_interval = 100
+
         while self.running:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
@@ -86,7 +91,11 @@ class KafkaConsumerHandler:
             else:
                 message_str = msg.value().decode("utf-8")
                 self.msg_queue.put(message_str)
-                self.consumer.commit(msg)
+                messages_since_commit += 1
+
+                if messages_since_commit >= commit_interval:
+                    self.consumer.commit(asynchronous=True)
+                    messages_since_commit = 0
 
     def consume(self, break_after=20):
         last_message_time = time.time()
