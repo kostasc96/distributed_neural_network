@@ -1,11 +1,13 @@
 import time
 from confluent_kafka import Producer
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING, OFFSET_END, KafkaException
-from fast_queue import FastQueue
+from queue import Queue, Empty
+from pcomp.fast_queue import FastQueue
 import threading
 
 class KafkaProducerHandler:
-    def __init__(self, server):
+    def __init__(self, server, topic):
+        self.topic = topic
         self.producer = Producer({
             'bootstrap.servers': server,
             'acks': 'all',
@@ -21,12 +23,22 @@ class KafkaProducerHandler:
             print(f'Message delivery failed: {err}')
     
 
-    def send(self, topic, message, partition=None):
+    def send(self, message, partition=None):
         value = message.encode('utf-8')
-        if partition is not None:
-            self.producer.produce(topic, value=value, partition=partition)
-        else:
-            self.producer.produce(topic, value=value)
+        # Poll to serve delivery callbacks and free up queue space
+        self.producer.poll(0)
+        try:
+            if partition is not None:
+                self.producer.produce(self.topic, value=value, partition=partition)
+            else:
+                self.producer.produce(self.topic, value=value)
+        except BufferError:
+            # If the queue is still full, poll briefly to free up space and retry
+            self.producer.poll(0.1)
+            if partition is not None:
+                self.producer.produce(self.topic, value=value, partition=partition)
+            else:
+                self.producer.produce(self.topic, value=value)
 
     def close(self):
         self.producer.flush()
@@ -73,21 +85,19 @@ class KafkaConsumerHandler:
                     raise KafkaException(msg.error())
             else:
                 message_str = msg.value().decode("utf-8")
-                if self.msg_queue.size() >= self.msg_queue._maxsize:
-                    print("Queue is full — waiting to enqueue Kafka message")
-                self.msg_queue.enqueue(message_str)
+                self.msg_queue.put(message_str)
                 self.consumer.commit(msg)
 
     def consume(self, break_after=20):
         last_message_time = time.time()
         while True:
-            message = self.msg_queue.dequeue(timeout=0.5)
-            if message is not None:
+            try:
+                message = self.msg_queue.get(timeout=0.5)
                 last_message_time = time.time()
                 yield message
-            elif time.time() - last_message_time >= break_after:
-                break
-
+            except Empty:
+                if time.time() - last_message_time >= break_after:
+                    break
     
     def commit(self):
         self.consumer.commit()

@@ -1,33 +1,40 @@
-import time
 from collections import deque
 from threading import Lock, Condition
+from queue import Empty  # Import Empty exception for timeout handling
 
 cdef class FastQueue:
+    cdef object _queue
+    cdef object _lock
+    cdef object _not_empty
+    cdef object _not_full
+    cdef int _maxsize
+
     def __cinit__(self, int maxsize=0):
         self._queue = deque()
         self._lock = Lock()
         self._not_empty = Condition(self._lock)
         self._not_full = Condition(self._lock)
-        self._maxsize = maxsize  # 0 = unbounded
+        self._maxsize = maxsize
 
-    def enqueue(self, object item):
+    def put(self, object item, double timeout=-1):
         with self._not_full:
             while self._maxsize and len(self._queue) >= self._maxsize:
-                self._not_full.wait()  # block until space is available
-
+                if timeout < 0:
+                    self._not_full.wait()  # wait indefinitely
+                else:
+                    if not self._not_full.wait(timeout):
+                        raise Exception("put timeout")
             self._queue.append(item)
             self._not_empty.notify()
 
-    def dequeue(self, double timeout=0.0):
-        cdef double deadline = time.time() + timeout if timeout > 0 else 0.0
-
+    def get(self, double timeout=-1):
         with self._not_empty:
             while not self._queue:
-                remaining = deadline - time.time() if timeout > 0 else None
-                if timeout > 0 and remaining <= 0:
-                    return None
-                self._not_empty.wait(timeout=remaining)
-
+                if timeout < 0:
+                    self._not_empty.wait()  # wait indefinitely
+                else:
+                    if not self._not_empty.wait(timeout):
+                        raise Empty
             item = self._queue.popleft()
             self._not_full.notify()
             return item
