@@ -1,6 +1,5 @@
 import time
-from confluent_kafka import Producer
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Producer, Consumer, KafkaError, TopicPartition
 from queue import Empty
 from pcomp.fast_queue import FastQueue
 import threading
@@ -10,30 +9,32 @@ class KafkaProducerHandler:
         self.topic = topic
         self.producer = Producer({
             'bootstrap.servers': server,
-            'acks': 'all',
-            'retries': 5,
             'linger.ms': 100,
             'batch.size': 131072,
-            'compression.type': 'lz4',
-            'socket.send.buffer.bytes': 1048576
+            'compression.type': 'lz4'  ,
+            'socket.send.buffer.bytes': 1048576,
+            'enable.idempotence': True
         })
+    
 
     def delivery_report(self, err, msg):
         if err is not None:
             print(f'Message delivery failed: {err}')
+    
 
-    def send(self, message, key=None):
+    def send(self, message):
         value = message.encode('utf-8')
-        key_encoded = key.encode('utf-8') if key else None
         self.producer.poll(0)
         try:
-            self.producer.produce(self.topic, value=value, key=key_encoded)
+            self.producer.produce(self.topic, value=value)
         except BufferError:
+            # If the queue is still full, poll briefly to free up space and retry
             self.producer.poll(0.1)
-            self.producer.produce(self.topic, value=value, key=key_encoded)
+            self.producer.produce(self.topic, value=value)
 
     def close(self):
         self.producer.flush()
+
 
 
 class KafkaConsumerHandler:
@@ -43,8 +44,7 @@ class KafkaConsumerHandler:
             'bootstrap.servers': servers,
             'group.id': group_id,
             'auto.offset.reset': 'latest',
-            'enable.auto.commit': True,
-            'auto.commit.interval.ms': 1000,
+            'enable.auto.commit': False,
             'fetch.min.bytes': 1048576,
             'fetch.wait.max.ms': 100,
             'max.partition.fetch.bytes': 10485760,
@@ -55,33 +55,49 @@ class KafkaConsumerHandler:
         self.running = True
         self.poll_thread = threading.Thread(target=self._poll_messages, daemon=True)
         self.poll_thread.start()
-
+    
     def _poll_messages(self, poll_timeout=0.5):
+        messages_since_commit = 0
+        commit_interval = 100
         while self.running:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
                 continue
             if msg.error():
+                # Since we're using a consumer group with auto commit, just log the error.
+                if msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                    metadata = self.consumer.list_topics(self.topic)
+                    partitions = [p.id for p in metadata.topics[self.topic].partitions.values()]
+                    topic_partitions = [TopicPartition(self.topic, partition) for partition in partitions]
+                    self.consumer.assign(topic_partitions)
+                    self.consumer.seek_to_end()
+                    end_offsets = self.consumer.position(topic_partitions)
+                    self.consumer.commit(offsets=end_offsets, asynchronous=False)
+                else:
+                    print(f"Consumer error: {msg.error()}")
                 continue
             else:
-                key = msg.key().decode("utf-8") if msg.key() else None
-                value = msg.value().decode("utf-8")
-                self.msg_queue.put((key, value))
+                message_str = msg.value().decode("utf-8")
+                self.msg_queue.put(message_str)
+                messages_since_commit += 1
+                if messages_since_commit >= commit_interval:
+                    self.consumer.commit(asynchronous=True)
+                    messages_since_commit = 0
+                
 
-    def consume(self, break_after=20, key_filter=None):
+    def consume(self, break_after=20):
         last_message_time = time.time()
         while True:
             try:
                 message = self.msg_queue.get(timeout=0.5)
-            except Empty:  # explicitly catch Empty
+                last_message_time = time.time()
+                yield message
+            except Empty:
                 if time.time() - last_message_time >= break_after:
                     break
-                continue
-
-            last_message_time = time.time()
-            key, value = message
-            if key_filter is None or key == key_filter:
-                yield key, value
+    
+    def commit(self):
+        self.consumer.commit()
 
     def close(self):
         self.running = False
