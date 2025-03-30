@@ -1,7 +1,8 @@
 numpy
 redis
 confluent-kafka
-minio
+boto3
+botocore
 fastavro
 jupyter
 notebook
