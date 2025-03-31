@@ -24,6 +24,7 @@ class Neuron(threading.Thread):
         self.activation_func = ACTIVATIONS.get(activation, relu)
         self.is_final_layer = is_final_layer
         self.producer = None
+        self.executor = ThreadPoolExecutor(max_workers=4)
         
 
     def process_data(self, inputs):
@@ -31,7 +32,8 @@ class Neuron(threading.Thread):
         return z if self.is_final_layer else self.activation_func(z)
 
     def process_and_send(self, image_id, input_data):
-        output = self.process_data(input_data)
+        z = np.dot(input_data, self.weights) + self.bias
+        output = z if self.is_final_layer else self.activation_func(z)
         output_str = format(output, '.17g')
         msg = f"{self.neuron_id}|{image_id}|{output_str}"
         self.producer.send(msg)
@@ -39,7 +41,7 @@ class Neuron(threading.Thread):
 
     def run(self):
         # Instantiate Kafka consumer and producer inside the thread.
-        consumer = KafkaConsumerHandler(f'layer-{self.layer_id_num}', KAFKA_BROKER, group_id=f"{self.neuron_id}_{self.layer_id_num}_group")
+        consumer = KafkaConsumerHandlerNeuron(f'layer-{self.layer_id_num}', KAFKA_BROKER, group_id=f"{self.neuron_id}_{self.layer_id_num}_group")
         self.producer = KafkaProducerHandler(KAFKA_BROKER, f'layer-{self.layer_id_num}-complete')
         last_msg_time = time.time()
         while True:
@@ -47,12 +49,14 @@ class Neuron(threading.Thread):
             for message in consumer.consume():
                 got_message = True
                 last_msg_time = time.time()
-                layer, image_id_str, input_str = message.split('|')
-                image_id = int(image_id_str)
-                arr_bytes = b64decode(input_str)
-                input_data = np.frombuffer(arr_bytes, dtype=np.float64)
+                message_dict = avro_deserialize(message.value())
+                layer = message_dict["layer_id"]
+                image_id = message_dict["image_id"]
+                data_bytes = message_dict["data"]
+                input_data = np.frombuffer(data_bytes, dtype=np.float64)
                 if layer == self.layer_id:
-                    self.process_and_send(image_id, input_data)
+                    self.executor.submit(self.process_and_send, image_id, input_data)
+                    #self.process_and_send(image_id, input_data)
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
@@ -67,8 +71,7 @@ class LayerCoordinator(threading.Thread):
         self.layer_id_num = int(self.layer_id.replace("layer_", ""))
         self.neuron_count = neuron_count
         self.is_final_layer = is_final_layer
-        self.outputs = {}
-        self.completed_count = {}
+        self.accumulators = {}
         self.redis_handler = RedisHandler('host.docker.internal', 6379, 0)
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.producer = None
@@ -87,17 +90,16 @@ class LayerCoordinator(threading.Thread):
                 neuron_id = msg.neuron_id
                 image_id = msg.image_id
                 output = msg.output
-                if image_id not in self.outputs:
-                    self.outputs[image_id] = [None] * self.neuron_count
-                    self.completed_count[image_id] = 0
-                if self.outputs[image_id][neuron_id] is None:
-                    self.outputs[image_id][neuron_id] = output
-                    self.completed_count[image_id] += 1
-                if self.completed_count[image_id] == self.neuron_count:
-                    local_outputs = self.outputs[image_id].copy()
-                    self.executor.submit(self.aggregate_neuron_outputs, image_id, local_outputs)
-                    del self.outputs[image_id]
-                    del self.completed_count[image_id]
+                try:
+                    acc = self.accumulators[image_id]
+                except KeyError:
+                    acc = self.accumulators[image_id] = NeuronsAccumulator(self.neuron_count)
+                if acc.outputs[neuron_id] is None:
+                    acc.outputs[neuron_id] = output
+                    acc.completed += 1
+                if acc.completed == self.neuron_count:
+                    self.executor.submit(self.aggregate_neuron_outputs, image_id, acc.outputs.copy())
+                    del self.accumulators[image_id]
             if not got_message and (time.time() - last_msg_time > 10):
                 consumer.commit()
                 consumer.close()
@@ -105,15 +107,13 @@ class LayerCoordinator(threading.Thread):
                 break
 
     def aggregate_neuron_outputs(self, image_id, local_outputs):
-        if not self.is_final_layer:
-            self.activate_next_layer(image_id)
         outputs = np.array(local_outputs, dtype=np.float64)
-        # Store the aggregated result in Redis.
-        self.redis_handler.set(f"streams:{image_id}:{self.layer_id_num}", outputs)
-        if self.is_final_layer:
+        if not self.is_final_layer:
+            self.redis_handler.set(f"streams:{image_id}:{self.layer_id_num}", outputs)
+            self.activate_next_layer(image_id)
+        else:
             prediction = int(np.argmax(outputs))
             self.redis_handler.hset('streams:predictions', image_id, prediction)
-            self.redis_handler.delete(f"streams:{image_id}")
             self.redis_handler.delete_streams_keys(image_id)
 
     def activate_next_layer(self, image_id):
@@ -140,9 +140,14 @@ class Layer(threading.Thread):
                 return data
 
     def activate_neurons(self, image_id):
-        input_data = self.fetch_input(image_id)
-        input_str = b64encode(input_data.tobytes()).decode('utf-8')
-        self.producer.send(f"{self.layer_id}|{image_id}|{input_str}")
+        input_data = self.fetch_input(image_id).tobytes()
+        message_dict = {
+            "layer_id": self.layer_id,
+            "image_id": image_id,
+            "data": input_data
+        }
+        msg = avro_serialize(message_dict)
+        self.producer.send_neuron(msg)
 
     def run(self):
         consumer = KafkaConsumerHandler('activate-layer', KAFKA_BROKER, group_id=f"{self.layer_id_num}_group")
