@@ -12,6 +12,20 @@ from pcomp.parser import parse_layer_coordinator_message, parse_layer_message
 # Kafka Configuration
 KAFKA_BROKER = 'kafka:9092'
 
+import json
+import numpy as np
+import threading
+import time
+from base64 import b64encode, b64decode
+from concurrent.futures import ThreadPoolExecutor
+from pcomp.kafka_utils import KafkaProducerHandler, KafkaConsumerHandler
+from pcomp.activation_functions import ACTIVATIONS, relu, softmax
+from pcomp.redis_utils import RedisHandler
+from pcomp.parser import parse_layer_coordinator_message, parse_layer_message
+
+# Kafka Configuration
+KAFKA_BROKER = 'kafka:9092'
+
 class Neuron(threading.Thread):
     def __init__(self, layer_id, neuron_id, weights, bias, activation, is_final_layer):
         threading.Thread.__init__(self)
@@ -58,6 +72,7 @@ class Neuron(threading.Thread):
                 consumer.close()
                 self.producer.close()
                 break
+            time.sleep(0.05)
 
 
 class LayerCoordinator(threading.Thread):
@@ -103,6 +118,7 @@ class LayerCoordinator(threading.Thread):
                 consumer.close()
                 self.producer.close()
                 break
+            time.sleep(0.05)
 
     def aggregate_neuron_outputs(self, image_id, local_outputs):
         if not self.is_final_layer:
@@ -166,6 +182,7 @@ class Layer(threading.Thread):
                 consumer.close()
                 self.producer.close()
                 break
+            time.sleep(0.05)
 
 def store_initial_input_data(image_np, image_id):
     redis_handler = RedisHandler('host.docker.internal', 6379, 0)
