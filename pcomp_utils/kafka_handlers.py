@@ -75,7 +75,7 @@ class KafkaConsumerHandler:
                 continue
             if msg.error():
                 # Since we're using a consumer group with auto commit, just log the error.
-                if msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                if msg.error().code() == KafkaError._OFFSET_OUT_OF_RANGE:
                     print("Offset out of range, resetting...")
                     partitions = self.consumer.assignment()  # Get current assignment
                     new_assignments = []
@@ -146,7 +146,7 @@ class KafkaConsumerHandlerNeuron:
                 continue
             if msg.error():
                 # Since we're using a consumer group with auto commit, just log the error.
-                if msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                if msg.error().code() == KafkaError._OFFSET_OUT_OF_RANGE:
                     metadata = self.consumer.list_topics(self.topic)
                     partitions = [p.id for p in metadata.topics[self.topic].partitions.values()]
                     topic_partitions = [TopicPartition(self.topic, partition) for partition in partitions]
