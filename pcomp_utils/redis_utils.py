@@ -42,7 +42,8 @@ class RedisHandler:
 
         
     def hset(self, key, field, value):
-        self.client.hset(key, field, value)
+        formatted = format(value, '.17g') if isinstance(value, float) else str(value)
+        self.client.hset(key, field, formatted)
     
     def hset_bulk(self, key, values):
         self.client.hset(key, mapping=values)
@@ -73,17 +74,47 @@ class RedisHandler:
                 break
     
     def delete_streams_keys(self, image_id):
-        pattern = f"streams:{image_id}:*"
-        cursor = 0
-        while True:
-            cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=1000)
-            if keys:
-                self.client.delete(*keys)
-            if cursor == 0:
-                break
+        patterns = [
+            f"streams:{image_id}:*",
+            f"outputs:{image_id}:*"
+        ]
+        for pattern in patterns:
+            cursor = 0
+            while True:
+                cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=1000)
+                if keys:
+                    self.client.delete(*keys)
+                if cursor == 0:
+                    break
     
     def hdel(self, h, f):
         self.client.delete(h, f)
     
     def expire(self, key, seconds=10):
         self.client.expire(key, seconds)
+
+    def store_neuron_output(self, key, neuron_id, output):
+        formatted = format(output, '.17g') if isinstance(output, float) else str(output)
+        self.client.hset(key, str(neuron_id), formatted)
+
+    def hlen(self, key):
+        return self.client.hlen(key)
+
+    def get_output_vector(self, key, neuron_count):
+        hash_data = self.client.hgetall(key)
+
+        if len(hash_data) != neuron_count:
+            raise ValueError(f"Output vector incomplete: {len(hash_data)} of {neuron_count} neurons written.")
+
+        vector = np.zeros(neuron_count, dtype=np.float64)
+        for k, v in hash_data.items():
+            idx = int(k.decode())
+            vector[idx] = np.float64(v.decode())
+
+        return vector
+
+    def exists(self, key):
+        return self.client.exists(key)
+    
+    def incr(self, key):
+        return self.client.incr(key)

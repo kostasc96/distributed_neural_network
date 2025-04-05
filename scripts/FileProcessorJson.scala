@@ -77,7 +77,7 @@ object FileProcessorJsonHttp extends App {
       .via(Framing.delimiter(ByteString("\n"), maximumFrameLength = 65536, allowTruncation = true))
       .map(_.utf8String)
       .drop(1) // Skip header if needed
-      .take(3)
+      .take(1000)
       .zipWithIndex
 
     val processFlow = Flow[(String, Long)].mapAsync(parallelism) {
@@ -101,7 +101,7 @@ object FileProcessorJsonHttp extends App {
 
 //          val kafkaMessage = s"""layer_0|$index"""
 //          kafkaProducer.send(new ProducerRecord[String, String]("activate-layer", null, "0", kafkaMessage))
-          val kafkaMessage = s"""layer_0|$index"""
+          val kafkaMessage = s"""$index"""
           kafkaProducer.send(new ProducerRecord[String, String]("layer-0", null, null, kafkaMessage))
 
           // Introduce a sleep of 0.5 seconds between sends
