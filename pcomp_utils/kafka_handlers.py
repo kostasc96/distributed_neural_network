@@ -73,21 +73,23 @@ class KafkaConsumerHandler:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
                 continue
-            if msg.error():
-                # Since we're using a consumer group with auto commit, just log the error.
-                if msg.error().code() == KafkaError._OFFSET_OUT_OF_RANGE:
-                    print("Offset out of range, resetting...")
-                    partitions = self.consumer.assignment()  # Get current assignment
+            if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                print("Offset out of range, resetting...")
+                # Get currently assigned partitions
+                partitions = self.consumer.assignment()
+                if partitions:
                     new_assignments = []
                     for p in partitions:
                         low, high = self.consumer.get_watermark_offsets(p)
+                        # Set the partition's offset to the high watermark
                         new_assignments.append(TopicPartition(p.topic, p.partition, high))
+                    # Reassign partitions with new valid offsets
                     self.consumer.assign(new_assignments)
-                    self.consumer.commit(asynchronous=False)
-                    continue
+                    # Optional: wait briefly to allow state update
+                    time.sleep(0.1)
                 else:
-                    print(f"Consumer error: {msg.error()}")
-                continue
+                    print("No partitions assigned; cannot reset offset.")
+                continue  # Skip processing this message
             else:
                 self.msg_queue.put(msg.value().decode("utf-8"))
                 messages_since_commit += 1
@@ -144,19 +146,23 @@ class KafkaConsumerHandlerNeuron:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
                 continue
-            if msg.error():
-                # Since we're using a consumer group with auto commit, just log the error.
-                if msg.error().code() == KafkaError._OFFSET_OUT_OF_RANGE:
-                    metadata = self.consumer.list_topics(self.topic)
-                    partitions = [p.id for p in metadata.topics[self.topic].partitions.values()]
-                    topic_partitions = [TopicPartition(self.topic, partition) for partition in partitions]
-                    self.consumer.assign(topic_partitions)
-                    self.consumer.seek_to_end()
-                    end_offsets = self.consumer.position(topic_partitions)
-                    self.consumer.commit(offsets=end_offsets, asynchronous=False)
+            if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                print("Offset out of range, resetting...")
+                # Get currently assigned partitions
+                partitions = self.consumer.assignment()
+                if partitions:
+                    new_assignments = []
+                    for p in partitions:
+                        low, high = self.consumer.get_watermark_offsets(p)
+                        # Set the partition's offset to the high watermark
+                        new_assignments.append(TopicPartition(p.topic, p.partition, high))
+                    # Reassign partitions with new valid offsets
+                    self.consumer.assign(new_assignments)
+                    # Optional: wait briefly to allow state update
+                    time.sleep(0.1)
                 else:
-                    print(f"Consumer error: {msg.error()}")
-                continue
+                    print("No partitions assigned; cannot reset offset.")
+                continue  # Skip processing this message
             else:
                 self.msg_queue.put(msg)
                 messages_since_commit += 1

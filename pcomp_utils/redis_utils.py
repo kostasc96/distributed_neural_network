@@ -4,6 +4,11 @@ import numpy as np
 class RedisHandler:
     def __init__(self, host, port, db):
         self.client = redis.Redis(host, port, db)
+        self.lua_neuron = """
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            local incrResult = redis.call('INCR', KEYS[2])
+            return incrResult
+        """
 
     def set(self, key, value, to_bytes=True, seconds=15):
         if to_bytes:
@@ -118,3 +123,6 @@ class RedisHandler:
     
     def incr(self, key):
         return self.client.incr(key)
+    
+    def store_neuron_result(self, hash_key, cnt_key, field, value):
+        return self.client.eval(self.lua_neuron, 2, hash_key, cnt_key, field, value)
