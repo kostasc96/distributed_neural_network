@@ -2,13 +2,15 @@ import redis
 import numpy as np
 
 class RedisHandler:
-    def __init__(self, host, port, db):
-        self.client = redis.Redis(host, port, db)
+    def __init__(self, host, port, db, max_con=5):
+        pool = redis.ConnectionPool(host=host, port=port, db=db, max_connections=max_con)
+        self.client = redis.Redis(connection_pool=pool)
         self.lua_neuron = """
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
             local incrResult = redis.call('INCR', KEYS[2])
             return incrResult
         """
+        self.lua_sha = self.client.script_load(self.lua_neuron)
 
     def set(self, key, value, to_bytes=True, seconds=15):
         if to_bytes:
@@ -124,5 +126,13 @@ class RedisHandler:
     def incr(self, key):
         return self.client.incr(key)
     
-    def store_neuron_result(self, hash_key, cnt_key, field, value):
-        return self.client.eval(self.lua_neuron, 2, hash_key, cnt_key, field, value)
+    def store_neuron_result(self, hash_key, cnt_key, field, value, neuron_count):
+        try:
+            result = self.client.evalsha(self.lua_sha, 2, hash_key, cnt_key, field, value, neuron_count)
+        except redis.exceptions.ResponseError as e:
+            if "NOSCRIPT" in str(e):
+                self.lua_sha = self.client.script_load(self.lua_neuron)
+                result = self.client.evalsha(self.lua_sha, 2, hash_key, cnt_key, field, value, neuron_count)
+            else:
+                raise
+        return result
