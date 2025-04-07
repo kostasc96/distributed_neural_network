@@ -1,5 +1,6 @@
 import redis
 import numpy as np
+from pcomp.fast_vector import dict_to_vector
 
 class RedisHandler:
     def __init__(self, host, port, db, max_con=5):
@@ -108,17 +109,12 @@ class RedisHandler:
         return self.client.hlen(key)
 
     def get_output_vector(self, key, neuron_count):
-        hash_data = self.client.hgetall(key)
-
+        raw_data = self.client.hgetall(key)
+        hash_data = {k.decode(): v.decode() for k, v in raw_data.items()}
         if len(hash_data) != neuron_count:
             raise ValueError(f"Output vector incomplete: {len(hash_data)} of {neuron_count} neurons written.")
-
-        vector = np.zeros(neuron_count, dtype=np.float64)
-        for k, v in hash_data.items():
-            idx = int(k.decode())
-            vector[idx] = np.float64(v.decode())
-
-        return vector
+        vector = dict_to_vector(hash_data, neuron_count)
+        return np.array(vector, dtype=np.float64)
 
     def exists(self, key):
         return self.client.exists(key)
