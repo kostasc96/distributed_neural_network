@@ -1,5 +1,5 @@
 import time
-from confluent_kafka import Producer, Consumer, KafkaError, TopicPartition
+from confluent_kafka import Producer, Consumer, KafkaError, TopicPartition, OFFSET_END
 from queue import Empty
 from pcomp.fast_queue import FastQueue
 import threading
@@ -75,21 +75,15 @@ class KafkaConsumerHandler:
                 continue
             if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
                 print("Offset out of range, resetting...")
-                # Get currently assigned partitions
-                partitions = self.consumer.assignment()
-                if partitions:
-                    new_assignments = []
-                    for p in partitions:
-                        low, high = self.consumer.get_watermark_offsets(p)
-                        # Set the partition's offset to the high watermark
-                        new_assignments.append(TopicPartition(p.topic, p.partition, high))
-                    # Reassign partitions with new valid offsets
-                    self.consumer.assign(new_assignments)
-                    # Optional: wait briefly to allow state update
-                    time.sleep(0.1)
-                else:
-                    print("No partitions assigned; cannot reset offset.")
-                continue  # Skip processing this message
+                current_assignments = self.consumer.assignment() or [
+                    TopicPartition(msg.topic(), msg.partition())
+                ]
+                new_assignments = [
+                    TopicPartition(tp.topic, tp.partition, OFFSET_END)
+                    for tp in current_assignments
+                ]
+                self.consumer.assign(new_assignments)
+                continue
             else:
                 self.msg_queue.put(msg.value().decode("utf-8"))
                 messages_since_commit += 1
@@ -148,21 +142,15 @@ class KafkaConsumerHandlerNeuron:
                 continue
             if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
                 print("Offset out of range, resetting...")
-                # Get currently assigned partitions
-                partitions = self.consumer.assignment()
-                if partitions:
-                    new_assignments = []
-                    for p in partitions:
-                        low, high = self.consumer.get_watermark_offsets(p)
-                        # Set the partition's offset to the high watermark
-                        new_assignments.append(TopicPartition(p.topic, p.partition, high))
-                    # Reassign partitions with new valid offsets
-                    self.consumer.assign(new_assignments)
-                    # Optional: wait briefly to allow state update
-                    time.sleep(0.1)
-                else:
-                    print("No partitions assigned; cannot reset offset.")
-                continue  # Skip processing this message
+                current_assignments = self.consumer.assignment() or [
+                    TopicPartition(msg.topic(), msg.partition())
+                ]
+                new_assignments = [
+                    TopicPartition(tp.topic, tp.partition, OFFSET_END)
+                    for tp in current_assignments
+                ]
+                self.consumer.assign(new_assignments)
+                continue
             else:
                 self.msg_queue.put(msg)
                 messages_since_commit += 1

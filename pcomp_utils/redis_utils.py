@@ -13,12 +13,12 @@ class RedisHandler:
         """
         self.lua_sha = self.client.script_load(self.lua_neuron)
 
-    def set(self, key, value, to_bytes=True, seconds=15):
+    def set(self, key, value, to_bytes=True, ttl=15):
         if to_bytes:
             self.client.set(key, value.astype(np.float64).tobytes())
         else:
             self.client.set(key, value)
-        self.client.expire(key, seconds)
+        self.client.expire(key, ttl)
 
     def get(self, key, from_bytes=True):
         data = self.client.get(key)
@@ -52,6 +52,11 @@ class RedisHandler:
     def hset(self, key, field, value):
         formatted = format(value, '.17g') if isinstance(value, float) else str(value)
         self.client.hset(key, field, formatted)
+    
+    def hset_expiry(self, key, field, value, ttl):
+        formatted = format(value, '.17g') if isinstance(value, float) else str(value)
+        self.client.hset(key, field, formatted)
+        self.client.expire(key, ttl)
     
     def hset_bulk(self, key, values):
         self.client.hset(key, mapping=values)
