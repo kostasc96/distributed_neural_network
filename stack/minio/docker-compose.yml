@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"   # MinIO API
+      - "9001:9001"   # MinIO web console
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./minio-data:/data   # Local bind mount so you can drop files directly
+    networks:
+      - kafka_docker_kafka-network  # Connect to Kafka's network
+
+networks:
+  kafka_docker_kafka-network:
+    driver: bridge

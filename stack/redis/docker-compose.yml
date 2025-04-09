@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:latest
+    container_name: redis_container
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - kafka_docker_kafka-network
+    gpus: all
+    command: ["redis-server", "--bind", "0.0.0.0", "--maxclients", "4000"]
+
+  redis_commander:
+    image: rediscommander/redis-commander:latest
+    container_name: redis_commander
+    restart: always
+    environment:
+      - REDIS_HOSTS=local:redis_container
+    ports:
+      - "8082:8081"  # Change external port to 8082
+    networks:
+      - kafka_docker_kafka-network
+
+networks:
+  kafka_docker_kafka-network:
+    driver: bridge
