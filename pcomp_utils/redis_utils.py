@@ -137,3 +137,6 @@ class RedisHandler:
             else:
                 raise
         return result
+    
+    def close(self):
+        self.client.close()
