@@ -31,6 +31,17 @@ class KafkaProducerHandler:
             # If the queue is still full, poll briefly to free up space and retry
             self.producer.poll(0.1)
             self.producer.produce(self.topic, value=value)
+    
+    def send_with_key(self, key, message):
+        key = key.encode('utf-8')
+        value = message.encode('utf-8')
+        self.producer.poll(0)
+        try:
+            self.producer.produce(self.topic, key=key, value=value)
+        except BufferError:
+            # If the queue is still full, poll briefly to free up space and retry
+            self.producer.poll(0.1)
+            self.producer.produce(self.topic, value=value)
 
     def send_neuron(self, message):
         value = message

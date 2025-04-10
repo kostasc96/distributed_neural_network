@@ -1,6 +1,6 @@
 import redis
 import numpy as np
-from pcomp.fast_vector import dict_to_vector
+from pcomp.fast_vector_cpp import get_output_vector_cpp
 
 class RedisHandler:
     def __init__(self, host, port, db, max_con=5):
@@ -114,13 +114,12 @@ class RedisHandler:
         return self.client.hlen(key)
 
     def get_output_vector(self, key, neuron_count):
-        raw_data = self.client.hgetall(key)
-        hash_data = {k.decode(): v.decode() for k, v in raw_data.items()}
-        if len(hash_data) != neuron_count:
-            raise ValueError(f"Output vector incomplete: {len(hash_data)} of {neuron_count} neurons written.")
-        vector = dict_to_vector(hash_data, neuron_count)
-        return np.array(vector, dtype=np.float64)
-
+        try:
+            raw_data = self.client.hgetall(key)
+            return get_output_vector_cpp(raw_data, neuron_count)
+        except Exception:
+            raise ValueError("Error in retrieving previous layer output")
+        
     def exists(self, key):
         return self.client.exists(key)
     

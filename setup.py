@@ -14,6 +14,13 @@ ext_modules = [
         include_dirs=[pybind11.get_include()],
         language="c++",
         extra_compile_args=["-O3", "-march=native"],
+    ),
+    Extension(
+        "pcomp.fast_vector_cpp",  # this places it inside pcomp
+        ["pcomp_utils/fast_vector_cpp.cpp"],
+        include_dirs=[pybind11.get_include()],
+        language="c++",
+        extra_compile_args=["-O3", "-march=native"],
     )
 ]
 ext_modules += cythonize(
