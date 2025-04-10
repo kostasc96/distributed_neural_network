@@ -1,16 +1,24 @@
 import redis
 import numpy as np
+from pcomp.fast_vector_cpp import get_output_vector_cpp
 
 class RedisHandler:
-    def __init__(self, host, port, db):
-        self.client = redis.Redis(host, port, db)
+    def __init__(self, host, port, db, max_con=5):
+        pool = redis.ConnectionPool(host=host, port=port, db=db, max_connections=max_con)
+        self.client = redis.Redis(connection_pool=pool)
+        self.lua_neuron = """
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            local incrResult = redis.call('INCR', KEYS[2])
+            return incrResult
+        """
+        self.lua_sha = self.client.script_load(self.lua_neuron)
 
-    def set(self, key, value, to_bytes=True, seconds=15):
+    def set(self, key, value, to_bytes=True, ttl=15):
         if to_bytes:
             self.client.set(key, value.astype(np.float64).tobytes())
         else:
             self.client.set(key, value)
-        self.client.expire(key, seconds)
+        self.client.expire(key, ttl)
 
     def get(self, key, from_bytes=True):
         data = self.client.get(key)
@@ -42,7 +50,13 @@ class RedisHandler:
 
         
     def hset(self, key, field, value):
-        self.client.hset(key, field, value)
+        formatted = format(value, '.17g') if isinstance(value, float) else str(value)
+        self.client.hset(key, field, formatted)
+    
+    def hset_expiry(self, key, field, value, ttl):
+        formatted = format(value, '.17g') if isinstance(value, float) else str(value)
+        self.client.hset(key, field, formatted)
+        self.client.expire(key, ttl)
     
     def hset_bulk(self, key, values):
         self.client.hset(key, mapping=values)
@@ -73,17 +87,55 @@ class RedisHandler:
                 break
     
     def delete_streams_keys(self, image_id):
-        pattern = f"streams:{image_id}:*"
-        cursor = 0
-        while True:
-            cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=1000)
-            if keys:
-                self.client.delete(*keys)
-            if cursor == 0:
-                break
+        patterns = [
+            f"streams:{image_id}:*",
+            f"outputs:{image_id}:*"
+        ]
+        for pattern in patterns:
+            cursor = 0
+            while True:
+                cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=1000)
+                if keys:
+                    self.client.delete(*keys)
+                if cursor == 0:
+                    break
     
     def hdel(self, h, f):
         self.client.delete(h, f)
     
     def expire(self, key, seconds=10):
         self.client.expire(key, seconds)
+
+    def store_neuron_output(self, key, neuron_id, output):
+        formatted = format(output, '.17g') if isinstance(output, float) else str(output)
+        self.client.hset(key, str(neuron_id), formatted)
+
+    def hlen(self, key):
+        return self.client.hlen(key)
+
+    def get_output_vector(self, key, neuron_count):
+        try:
+            raw_data = self.client.hgetall(key)
+            return get_output_vector_cpp(raw_data, neuron_count)
+        except Exception:
+            raise ValueError("Error in retrieving previous layer output")
+        
+    def exists(self, key):
+        return self.client.exists(key)
+    
+    def incr(self, key):
+        return self.client.incr(key)
+    
+    def store_neuron_result(self, hash_key, cnt_key, field, value, neuron_count):
+        try:
+            result = self.client.evalsha(self.lua_sha, 2, hash_key, cnt_key, field, value, neuron_count)
+        except redis.exceptions.ResponseError as e:
+            if "NOSCRIPT" in str(e):
+                self.lua_sha = self.client.script_load(self.lua_neuron)
+                result = self.client.evalsha(self.lua_sha, 2, hash_key, cnt_key, field, value, neuron_count)
+            else:
+                raise
+        return result
+    
+    def close(self):
+        self.client.close()

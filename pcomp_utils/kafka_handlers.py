@@ -1,5 +1,5 @@
 import time
-from confluent_kafka import Producer, Consumer, KafkaError, TopicPartition
+from confluent_kafka import Producer, Consumer, KafkaError, TopicPartition, OFFSET_END
 from queue import Empty
 from pcomp.fast_queue import FastQueue
 import threading
@@ -27,6 +27,17 @@ class KafkaProducerHandler:
         self.producer.poll(0)
         try:
             self.producer.produce(self.topic, value=value)
+        except BufferError:
+            # If the queue is still full, poll briefly to free up space and retry
+            self.producer.poll(0.1)
+            self.producer.produce(self.topic, value=value)
+    
+    def send_with_key(self, key, message):
+        key = key.encode('utf-8')
+        value = message.encode('utf-8')
+        self.producer.poll(0)
+        try:
+            self.producer.produce(self.topic, key=key, value=value)
         except BufferError:
             # If the queue is still full, poll briefly to free up space and retry
             self.producer.poll(0.1)
@@ -73,20 +84,16 @@ class KafkaConsumerHandler:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
                 continue
-            if msg.error():
-                # Since we're using a consumer group with auto commit, just log the error.
-                if msg.error().code() == KafkaError._OFFSET_OUT_OF_RANGE:
-                    print("Offset out of range, resetting...")
-                    partitions = self.consumer.assignment()  # Get current assignment
-                    new_assignments = []
-                    for p in partitions:
-                        low, high = self.consumer.get_watermark_offsets(p)
-                        new_assignments.append(TopicPartition(p.topic, p.partition, high))
-                    self.consumer.assign(new_assignments)
-                    self.consumer.commit(asynchronous=False)
-                    continue
-                else:
-                    print(f"Consumer error: {msg.error()}")
+            if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                print("Offset out of range, resetting...")
+                current_assignments = self.consumer.assignment() or [
+                    TopicPartition(msg.topic(), msg.partition())
+                ]
+                new_assignments = [
+                    TopicPartition(tp.topic, tp.partition, OFFSET_END)
+                    for tp in current_assignments
+                ]
+                self.consumer.assign(new_assignments)
                 continue
             else:
                 self.msg_queue.put(msg.value().decode("utf-8"))
@@ -144,18 +151,16 @@ class KafkaConsumerHandlerNeuron:
             msg = self.consumer.poll(poll_timeout)
             if msg is None:
                 continue
-            if msg.error():
-                # Since we're using a consumer group with auto commit, just log the error.
-                if msg.error().code() == KafkaError._OFFSET_OUT_OF_RANGE:
-                    metadata = self.consumer.list_topics(self.topic)
-                    partitions = [p.id for p in metadata.topics[self.topic].partitions.values()]
-                    topic_partitions = [TopicPartition(self.topic, partition) for partition in partitions]
-                    self.consumer.assign(topic_partitions)
-                    self.consumer.seek_to_end()
-                    end_offsets = self.consumer.position(topic_partitions)
-                    self.consumer.commit(offsets=end_offsets, asynchronous=False)
-                else:
-                    print(f"Consumer error: {msg.error()}")
+            if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+                print("Offset out of range, resetting...")
+                current_assignments = self.consumer.assignment() or [
+                    TopicPartition(msg.topic(), msg.partition())
+                ]
+                new_assignments = [
+                    TopicPartition(tp.topic, tp.partition, OFFSET_END)
+                    for tp in current_assignments
+                ]
+                self.consumer.assign(new_assignments)
                 continue
             else:
                 self.msg_queue.put(msg)

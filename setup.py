@@ -2,6 +2,7 @@ from setuptools import setup, find_packages, Extension
 import pybind11
 from Cython.Build import cythonize
 import os
+import numpy
 
 src_packages = find_packages(where="pcomp_utils")
 REQUIREMENTS = [i.strip() for i in open("requirements.txt").readlines()]
@@ -10,6 +11,13 @@ ext_modules = [
     Extension(
         "pcomp.neuroncalc",  # this places it inside pcomp
         ["pcomp_utils/neuroncalc.cpp"],
+        include_dirs=[pybind11.get_include()],
+        language="c++",
+        extra_compile_args=["-O3", "-march=native"],
+    ),
+    Extension(
+        "pcomp.fast_vector_cpp",  # this places it inside pcomp
+        ["pcomp_utils/fast_vector_cpp.cpp"],
         include_dirs=[pybind11.get_include()],
         language="c++",
         extra_compile_args=["-O3", "-march=native"],
@@ -29,7 +37,14 @@ ext_modules += cythonize(
     ),
     compiler_directives={"language_level": "3"}
 )
-
+ext_modules += cythonize(
+    Extension(
+        "pcomp.fast_vector",
+        ["pcomp_utils/fast_vector.pyx"],
+        include_dirs=[numpy.get_include()],
+    ),
+    compiler_directives={"language_level": "3"}
+)
 
 
 setup(

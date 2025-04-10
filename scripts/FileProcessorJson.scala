@@ -77,7 +77,7 @@ object FileProcessorJsonHttp extends App {
       .via(Framing.delimiter(ByteString("\n"), maximumFrameLength = 65536, allowTruncation = true))
       .map(_.utf8String)
       .drop(1) // Skip header if needed
-      .take(3)
+      .take(100)
       .zipWithIndex
 
     val processFlow = Flow[(String, Long)].mapAsync(parallelism) {
@@ -95,13 +95,14 @@ object FileProcessorJsonHttp extends App {
           try {
             redis.set(s"streams:$index:initial_data".getBytes, byteData)
             redis.hset("streams:images_label", index.toString, label)
+            redis.expire(s"streams:$index:initial_data", 10)
           } finally {
             redis.close() // Always close the Redis connection
           }
 
 //          val kafkaMessage = s"""layer_0|$index"""
 //          kafkaProducer.send(new ProducerRecord[String, String]("activate-layer", null, "0", kafkaMessage))
-          val kafkaMessage = s"""layer_0|$index"""
+          val kafkaMessage = s"""$index"""
           kafkaProducer.send(new ProducerRecord[String, String]("layer-0", null, null, kafkaMessage))
 
           // Introduce a sleep of 0.5 seconds between sends
@@ -126,8 +127,8 @@ object FileProcessorJsonHttp extends App {
 
 
   // Start the HTTP server on localhost:8080
-  val bindingFuture = Http().bindAndHandle(route, "localhost", 8081)
-  println("Server online at http://localhost:8081/\nTry: curl http://localhost:8081/processJson")
+  val bindingFuture = Http().bindAndHandle(route, "localhost", 8084)
+  println("Server online at http://localhost:8084/\nTry: curl http://localhost:8084/processJson")
 
   // (Optional) Add shutdown hook if you want to gracefully terminate the server and resources
 //  sys.addShutdownHook {
