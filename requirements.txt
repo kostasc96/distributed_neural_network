@@ -1,8 +1,5 @@
 intel-numpy
 redis
 confluent-kafka
-boto3
-botocore
-fastavro
 jupyter
 notebook
