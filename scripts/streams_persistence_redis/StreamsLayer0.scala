@@ -1,6 +1,7 @@
 package app
 
 import org.apache.kafka.clients.consumer.ConsumerConfig
+import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.streams.scala._
 import org.apache.kafka.streams.scala.kstream._
 import org.apache.kafka.streams.state.{KeyValueStore, Stores}
@@ -8,10 +9,9 @@ import org.apache.kafka.streams.kstream.{ValueTransformerWithKey, ValueTransform
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
 import org.apache.kafka.streams.scala.ImplicitConversions._
 import org.apache.kafka.streams.scala.Serdes._
-
 import redis.clients.jedis.{Jedis, JedisPool}
 
-import java.io.{ByteArrayOutputStream, DataOutputStream, File}
+import java.io.File
 import java.nio.ByteBuffer
 import java.util.Properties
 
@@ -67,11 +67,10 @@ object StreamsLayer0 {
               }
 
               if (collector.count >= neuronCount) {
-                jedis.set(
-                  s"0_$imageId".getBytes(),
-                  serializeDoubleArray(collector.values)
-                )
-                jedis.expire(s"0_$imageId".getBytes(), 5)
+                val pipe = jedis.pipelined()
+                pipe.set(s"0_$imageId".getBytes(), serializeDoubleArray(collector.values))
+                pipe.expire(s"0_$imageId".getBytes(), 5)
+                pipe.sync()
 
                 stateStore.delete(imageId)
                 imageId
@@ -98,8 +97,14 @@ object StreamsLayer0 {
     props.put(StreamsConfig.APPLICATION_ID_CONFIG, "streams-layer0-app")
     props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
     props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest")
-    props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, "500")
-    props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, "8")
+    props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, "1000")
+    props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, "12")
+
+    props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, (64*1024*1024).toString)
+    props.put(ProducerConfig.BATCH_SIZE_CONFIG, "65536")
+    props.put(ProducerConfig.LINGER_MS_CONFIG, "20")
+    props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4")
+
     props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.Serdes.StringSerde])
     props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.Serdes.StringSerde])
 
