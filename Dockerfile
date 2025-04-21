@@ -1,15 +1,20 @@
 # Use a Python base image
 FROM python:3.9-slim
 
-# Install system build essentials and Eigen
-RUN apt-get update && apt-get install -y build-essential libeigen3-dev
-
-# Install system build essentials (recommended for compiling)
-RUN apt-get update && apt-get install -y build-essential
-
 # Install pybind11 and build tooling BEFORE build
 RUN pip install --upgrade pip
 RUN pip install pybind11 wheel setuptools cython
+
+RUN apt-get \
+      -o Acquire::Check-Valid-Until=false \
+      -o Acquire::AllowReleaseInfoChange::Suite=true \
+      update \
+  && apt-get install -y --no-install-recommends \
+       build-essential \
+       python3-dev \
+       libgomp1         \
+       libgcc-12-dev   \
+  && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app

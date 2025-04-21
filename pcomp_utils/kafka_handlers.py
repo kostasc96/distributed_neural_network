@@ -59,69 +59,45 @@ class KafkaProducerHandler:
 
 
 class KafkaConsumerHandler:
-    def __init__(self, topic, servers, group_id='default_group'):
+    def __init__(self, topic, servers, batch_size=500, group_id='default_group'):
         self.topic = topic
+        self.batch_size = batch_size
         self.consumer = Consumer({
             'bootstrap.servers': servers,
             'group.id': group_id,
             'auto.offset.reset': 'latest',
-            'enable.auto.commit': False,
-            'fetch.min.bytes': 1048576,
-            'fetch.wait.max.ms': 100,
-            'max.partition.fetch.bytes': 10485760,
-            'socket.receive.buffer.bytes': 1048576
+            'enable.auto.commit': True,
+            'auto.commit.interval.ms': 5000,
+            'fetch.min.bytes': 262144,
+            'fetch.max.bytes': 134217728,
+            'fetch.wait.max.ms': 25,
+            'max.partition.fetch.bytes': 67108864,
+            'socket.receive.buffer.bytes': 8388608
         })
         self.consumer.subscribe([topic])
-        self.msg_queue = FastQueue(maxsize=10000)
-        self.running = True
-        self.poll_thread = threading.Thread(target=self._poll_messages, daemon=True)
-        self.poll_thread.start()
+
     
-    def _poll_messages(self, poll_timeout=0.5):
-        messages_since_commit = 0
-        commit_interval = 100
-        while self.running:
-            msg = self.consumer.poll(poll_timeout)
-            if msg is None:
-                continue
-            if msg.error() and msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
-                print("Offset out of range, resetting...")
-                current_assignments = self.consumer.assignment() or [
-                    TopicPartition(msg.topic(), msg.partition())
-                ]
-                new_assignments = [
-                    TopicPartition(tp.topic, tp.partition, OFFSET_END)
-                    for tp in current_assignments
-                ]
-                self.consumer.assign(new_assignments)
-                continue
-            else:
-                self.msg_queue.put(msg.value().decode("utf-8"))
-                messages_since_commit += 1
-                if messages_since_commit >= commit_interval:
-                    self.consumer.commit(asynchronous=True)
-                    messages_since_commit = 0
-                
-    def consume(self, break_after=20):
-        last_message_time = time.time()
-        while True:
-            try:
-                message = self.msg_queue.get(timeout=0.5)
-                last_message_time = time.time()
-                yield message
-            except Empty:
-                if time.time() - last_message_time >= break_after:
-                    break
+    def error_handling(self, msg):
+        if msg.error().code() == KafkaError.OFFSET_OUT_OF_RANGE:
+            print("Offset out of range, resetting...")
+            current_assignments = self.consumer.assignment() or [
+                TopicPartition(msg.topic(), msg.partition())
+            ]
+            new_assignments = [
+                TopicPartition(tp.topic, tp.partition, OFFSET_END)
+                for tp in current_assignments
+            ]
+            self.consumer.assign(new_assignments)
+    
+    def get_consumer(self):
+        return self.consumer
     
     def commit(self):
         self.consumer.commit()
 
     def close(self):
-        self.running = False
-        self.poll_thread.join()
-        if self.consumer is not None:
-            self.consumer.close()
-            self.consumer = None
+        self.consumer.close()
+        self.consumer = None
 
 
 class KafkaConsumerHandlerNeuron:
