@@ -9,11 +9,18 @@ class KafkaProducerHandler:
         self.topic = topic
         self.producer = Producer({
             'bootstrap.servers': server,
-            'linger.ms': 100,
-            'batch.size': 131072,
-            'compression.type': 'lz4'  ,
-            'socket.send.buffer.bytes': 1048576,
-            'enable.idempotence': True
+            'linger.ms': 5,
+            'batch.size': 256000,
+            'queue.buffering.max.ms': 100,
+            'queue.buffering.max.messages': 1000000,
+            'compression.type': 'lz4',
+            'enable.idempotence': True,
+            'acks': 'all',
+            'delivery.timeout.ms': 300000,
+            'message.send.max.retries': 5,
+            'retry.backoff.ms': 100,
+            'socket.keepalive.enable': True,
+            'socket.nagle.disable': True
         })
     
 
