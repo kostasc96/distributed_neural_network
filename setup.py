@@ -7,45 +7,11 @@ import numpy
 src_packages = find_packages(where="pcomp_utils")
 REQUIREMENTS = [i.strip() for i in open("requirements.txt").readlines()]
 
-ext_modules = [
-    Extension(
-        "pcomp.fast_vector_cpp",  # this places it inside pcomp
-        ["pcomp_utils/fast_vector_cpp.cpp"],
-        include_dirs=[pybind11.get_include()],
-        language="c++",
-        extra_compile_args=["-O3", "-march=native"],
-    ),
-     Extension(
-        "pcomp.dotmodule",
-        ["pcomp_utils/dotmodule.cpp"],
-        include_dirs=[
-            pybind11.get_include(),
-            numpy.get_include(),
-        ],
-        language="c++",
-        extra_compile_args=[
-           "-O3",
-           "-std=c++14",
-           "-march=native", 
-           "-mfma",            # for AVX2 FMA
-           "-fopenmp",         # enable OpenMP pragmas
-        ],
-       extra_link_args=[
-           "-fopenmp",         # link with OpenMP runtime
-       ],
-    )
-]
+ext_modules = []
 ext_modules += cythonize(
     Extension(
         "pcomp.fast_queue",
         ["pcomp_utils/fast_queue.pyx"]
-    ),
-    compiler_directives={"language_level": "3"}
-)
-ext_modules += cythonize(
-    Extension(
-        "pcomp.parser",
-        ["pcomp_utils/parser.pyx"]
     ),
     compiler_directives={"language_level": "3"}
 )

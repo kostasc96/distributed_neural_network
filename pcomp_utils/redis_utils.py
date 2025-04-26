@@ -1,6 +1,5 @@
 import redis
 import numpy as np
-from pcomp.fast_vector_cpp import get_output_vector_cpp
 
 class RedisHandler:
     def __init__(self, host, port, db, max_con=5):
@@ -108,12 +107,6 @@ class RedisHandler:
     def hlen(self, key):
         return self.client.hlen(key)
 
-    def get_output_vector(self, key, neuron_count):
-        try:
-            raw_data = self.client.hgetall(key)
-            return get_output_vector_cpp(raw_data, neuron_count)
-        except Exception:
-            raise ValueError("Error in retrieving previous layer output")
         
     def exists(self, key):
         return self.client.exists(key)
