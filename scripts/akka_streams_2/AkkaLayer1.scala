@@ -1,29 +1,23 @@
-package app
-
 import akka.actor.ActorSystem
-import akka.kafka.{ConsumerSettings, Subscriptions}
-import akka.kafka.scaladsl.Consumer
-import akka.stream.scaladsl.Sink
+import akka.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
+import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.{ActorMaterializer, Attributes, FlowShape, Inlet, Materializer, Outlet}
 import akka.stream.stage.{GraphStage, GraphStageLogic}
+import io.lettuce.core.RedisClient
+import io.lettuce.core.RedisFuture
+import io.lettuce.core.api.async.RedisAsyncCommands
+import io.lettuce.core.codec.ByteArrayCodec
 import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.common.serialization.StringDeserializer
+import org.apache.kafka.clients.producer.ProducerConfig
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
 
-import java.nio.file.{Files, Paths, StandardOpenOption}
 import java.nio.charset.StandardCharsets
 import scala.concurrent.{ExecutionContext, Future}
-import scala.concurrent.duration._
 import scala.collection.mutable
+import scala.compat.java8.FutureConverters
 
-// AWS SDK for S3 / MinIO
-import software.amazon.awssdk.auth.credentials.{AwsBasicCredentials, StaticCredentialsProvider}
-import software.amazon.awssdk.regions.Region
-import software.amazon.awssdk.services.s3.S3Client
-import software.amazon.awssdk.services.s3.model.PutObjectRequest
-import software.amazon.awssdk.core.sync.RequestBody
-import java.net.URI
-
-// --- Neuron Aggregator ---
+// A GraphStage that buffers exactly neuronCount outputs per image and emits once full.
 class NeuronAggregatorFinal(neuronCount: Int)
   extends GraphStage[FlowShape[(String, (Int, Double)), (String, Array[Double])]] {
 
@@ -32,8 +26,10 @@ class NeuronAggregatorFinal(neuronCount: Int)
   override val shape = FlowShape.of(in, out)
 
   override def createLogic(inheritedAttributes: Attributes) = new GraphStageLogic(shape) {
+    // state: imageId -> (array of outputs, set of seen indices, count)
     private val state = mutable.Map.empty[String, (Array[Double], mutable.BitSet, Int)]
 
+    // Handler for incoming elements
     setHandler(in, new akka.stream.stage.InHandler {
       override def onPush(): Unit = {
         val (imageId, (neuronId, value)) = grab(in)
@@ -48,7 +44,7 @@ class NeuronAggregatorFinal(neuronCount: Int)
         }
 
         if (state(imageId)._3 >= neuronCount) {
-          state -= imageId // ✅ Remove from state (correct)
+          state -= imageId
           push(out, (imageId, arr))
         } else {
           pull(in)
@@ -67,7 +63,7 @@ object AkkaLayer1 extends App {
   implicit val materializer: Materializer = ActorMaterializer()(system)
   implicit val ec: ExecutionContext = system.dispatcher
 
-  // --- Kafka Consumer Settings ---
+  // -- Kafka consumer settings
   val consumerSettings = ConsumerSettings(system, new StringDeserializer, new StringDeserializer)
     .withBootstrapServers("localhost:9092")
     .withGroupId("streams-1-group")
@@ -78,63 +74,59 @@ object AkkaLayer1 extends App {
     .withProperty(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "50")
     .withProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "5000")
 
+  // -- Kafka producer settings
+  val producerSettings = ProducerSettings(system, new StringSerializer, new StringSerializer)
+    .withBootstrapServers("localhost:9092")
+    .withProperty(ProducerConfig.LINGER_MS_CONFIG, "5")
+    .withProperty(ProducerConfig.BATCH_SIZE_CONFIG, "256000")
+    .withProperty(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4")
+    .withProperty(ProducerConfig.ACKS_CONFIG, "1")
+
+  // -- Lettuce Redis client
+  val redisClient = RedisClient.create("redis://localhost:6379")
+  val connection = redisClient.connect(new ByteArrayCodec())
+  val redisAsync: RedisAsyncCommands[Array[Byte], Array[Byte]] = connection.async()
+
   val neuronCount = 10
 
-  // --- S3 Client (MinIO) ---
-  val s3Client = S3Client.builder()
-    .endpointOverride(new URI("http://localhost:9000")) // Your MinIO endpoint
-    .forcePathStyle(true)                              // Important for MinIO
-    .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("admin", "admin123")))
-    .region(Region.US_EAST_1)
-    .build()
+  // Asynchronous Redis write using Lettuce
+  private def writeToRedis(imageId: String, outputs: Array[Double]): Future[Unit] = {
+    val maxIndex = outputs.zipWithIndex.maxBy(_._1)._2
+    val key   = "streams:predictions".getBytes(StandardCharsets.UTF_8)
+    val field = imageId.getBytes(StandardCharsets.UTF_8)
+    val value = maxIndex.toString.getBytes(StandardCharsets.UTF_8)
 
-  val bucketName = "predictions" // Make sure this exists!
+    // hset on Array[Byte], returns RedisFuture[java.lang.Boolean]
+    val javaF: RedisFuture[java.lang.Boolean] =
+      redisAsync.hset(key, field, value)
 
-  // --- File Writing Logic ---
-  @volatile var fileCounter = 0
-
-  def writeBatchToS3(batch: Seq[(String, Array[Double])]): Future[Unit] = Future {
-    val fileName = f"predictions_batch_${fileCounter}%05d.csv"
-    fileCounter += 1
-
-    val header = "image_id,prediction\n"
-    val rows = batch.map { case (imageId, arr) =>
-      val maxIndex = arr.zipWithIndex.maxBy(_._1)._2
-      s"$imageId,$maxIndex"
-    }.mkString("\n")
-    val content = header + rows + "\n"
-
-    // Write to temp local file
-    val tempFilePath = Paths.get(s"/tmp/$fileName")
-    Files.write(tempFilePath, content.getBytes(StandardCharsets.UTF_8))
-
-    // Correct S3 upload with RequestBody
-    val putRequest = PutObjectRequest.builder()
-      .bucket(bucketName)
-      .key(fileName)
-      .build()
-
-    s3Client.putObject(putRequest, RequestBody.fromFile(tempFilePath.toFile))
-    println(s"✅ Uploaded $fileName to S3 bucket '$bucketName'")
-
-    // Optional: Clean up temp file after upload
-    Files.deleteIfExists(tempFilePath)
+    // convert to Scala Future[Unit]
+    FutureConverters.toScala(javaF).map(_ => ())
   }
 
-  // --- Stream Pipeline ---
+  // Build & run the stream
   Consumer
     .plainSource(consumerSettings, Subscriptions.topics("layer-1-streams"))
+    // Parse "neuronId|value" into a tuple of (imageId, (neuronId, value))
     .map { msg =>
       val Array(nStr, vStr) = msg.value().split("\\|", 2)
       (msg.key(), (nStr.toInt, vStr.toDouble))
     }
+    // Aggregate 128 neuron outputs before emitting
     .via(new NeuronAggregatorFinal(neuronCount))
-    .groupedWithin(500, 5.seconds)
-    .mapAsync(4)(writeBatchToS3)
-    .runWith(Sink.ignore)
-    .onComplete { result =>
-      println(s"Stream completed: $result")
-      s3Client.close()
+    // Write to Redis, pass through imageId
+    .mapAsyncUnordered(16) { case (imageId, arr) =>
+      writeToRedis(imageId, arr).map(_ => imageId)
+    }
+    // Produce each imageId to the next Kafka topic
+    .map { imageId =>
+      new ProducerRecord[String, String]("layer-output", imageId, imageId)
+    }
+    // Send to Kafka and ignore the results
+    .runWith(Producer.plainSink(producerSettings))
+    .onComplete { _ =>
+      connection.close()
+      redisClient.shutdown()
       system.terminate()
     }
 }
