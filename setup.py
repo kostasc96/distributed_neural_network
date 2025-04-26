@@ -9,18 +9,30 @@ REQUIREMENTS = [i.strip() for i in open("requirements.txt").readlines()]
 
 ext_modules = [
     Extension(
-        "pcomp.neuroncalc",  # this places it inside pcomp
-        ["pcomp_utils/neuroncalc.cpp"],
-        include_dirs=[pybind11.get_include()],
-        language="c++",
-        extra_compile_args=["-O3", "-march=native"],
-    ),
-    Extension(
         "pcomp.fast_vector_cpp",  # this places it inside pcomp
         ["pcomp_utils/fast_vector_cpp.cpp"],
         include_dirs=[pybind11.get_include()],
         language="c++",
         extra_compile_args=["-O3", "-march=native"],
+    ),
+     Extension(
+        "pcomp.dotmodule",
+        ["pcomp_utils/dotmodule.cpp"],
+        include_dirs=[
+            pybind11.get_include(),
+            numpy.get_include(),
+        ],
+        language="c++",
+        extra_compile_args=[
+           "-O3",
+           "-std=c++14",
+           "-march=native", 
+           "-mfma",            # for AVX2 FMA
+           "-fopenmp",         # enable OpenMP pragmas
+        ],
+       extra_link_args=[
+           "-fopenmp",         # link with OpenMP runtime
+       ],
     )
 ]
 ext_modules += cythonize(

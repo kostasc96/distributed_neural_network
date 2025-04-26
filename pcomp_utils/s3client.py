@@ -26,3 +26,18 @@ class S3Client:
         self.s3.download_fileobj(Bucket=bucket_name, Key=file_name, Fileobj=buffer, Config=config)
         buffer.seek(0)
         return buffer
+    
+    def put_object(self, bucket_name, file_name, byte_data):
+        buffer = BytesIO(byte_data)
+        config = TransferConfig(
+            multipart_threshold=5 * 1024 * 1024,
+            max_concurrency=20,
+            multipart_chunksize=5 * 1024 * 1024,
+            use_threads=True
+        )
+        self.s3.upload_fileobj(
+            Fileobj=buffer,
+            Bucket=bucket_name,
+            Key=file_name,
+            Config=config
+        )
