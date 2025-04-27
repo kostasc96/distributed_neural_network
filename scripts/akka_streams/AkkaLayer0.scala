@@ -1,104 +1,127 @@
 package app
 
 import akka.actor.ActorSystem
-import akka.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
-import akka.kafka.scaladsl.{Consumer, Producer}
-import akka.stream.{ActorMaterializer, Materializer}
-import akka.stream.scaladsl.Flow
+import akka.kafka._
+import akka.kafka.scaladsl._
+import akka.stream._
+import akka.stream.scaladsl._
 import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.clients.producer.ProducerConfig
-import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.clients.producer.{ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
-
 import io.lettuce.core.RedisClient
-import io.lettuce.core.api.reactive.RedisReactiveCommands
+import io.lettuce.core.api.async.RedisAsyncCommands
 import io.lettuce.core.codec.ByteArrayCodec
-import java.nio.{ByteBuffer, ByteOrder}
+
 import java.nio.charset.StandardCharsets
-import scala.concurrent.{ExecutionContext, Future}
-import scala.compat.java8.FutureConverters._
-import scala.concurrent.duration._
+import java.nio.{ByteBuffer, ByteOrder}
+import scala.collection.mutable
+import scala.concurrent._
+
 
 object AkkaLayer0 extends App {
-  implicit val system: ActorSystem = ActorSystem("streams-0")
-  implicit val materializer: Materializer = ActorMaterializer()(system)
-  implicit val ec: ExecutionContext = system.dispatcher
+  implicit val system: ActorSystem   = ActorSystem("streams-0-opt")
+  implicit val mat:    Materializer  = ActorMaterializer()
+  implicit val ec:     ExecutionContext = system.dispatcher
 
-  val neuronCount = 128
+  val neuronCount     = 128
+  val maxInFlight     = 1024
 
-  // Thread-local direct ByteBuffer for zero-GC serialization
+  // Semaphore for Redis concurrency
+  private val sem = new java.util.concurrent.Semaphore(maxInFlight)
+  private val blockingDispatcher = system.dispatchers.lookup("akka.stream.default-blocking-io-dispatcher")
+  private def withPermit[T](f: => Future[T]): Future[T] =
+    Future(sem.acquire())(blockingDispatcher)
+      .flatMap(_ => f.transform { res => sem.release(); res })(ec)
+
+  // Zero-GC ByteBuffer per thread
   private val tlBuffer = ThreadLocal.withInitial[ByteBuffer](() =>
-    ByteBuffer.allocateDirect(neuronCount * java.lang.Double.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+    ByteBuffer.allocateDirect(neuronCount * java.lang.Double.BYTES)
+      .order(ByteOrder.LITTLE_ENDIAN)
   )
-
-  private def serialize(outputs: Array[Double]): Array[Byte] = {
+  private def serialize(arr: Array[Double]): Array[Byte] = {
     val buf = tlBuffer.get()
     buf.clear()
-    outputs.foreach(buf.putDouble)
+    arr.foreach(buf.putDouble)
     buf.flip()
-    val arr = new Array[Byte](buf.remaining())
-    buf.get(arr)
-    arr
+    val out = new Array[Byte](buf.remaining()); buf.get(out); out
   }
 
-  // Lettuce Reactive Redis client
+  // Redis async commands
   val redisClient = RedisClient.create("redis://localhost:6379")
-  val connection = redisClient.connect(new ByteArrayCodec())
-  val redisReactive: RedisReactiveCommands[Array[Byte], Array[Byte]] = connection.reactive()
-
-  private def writeReactive(id: String, data: Array[Byte]): Future[String] = {
+  val asyncCmds: RedisAsyncCommands[Array[Byte], Array[Byte]] =
+    redisClient.connect(new ByteArrayCodec()).async()
+  private def writeRedis(id: String, data: Array[Byte]): Future[Unit] = {
     val key = s"0_$id".getBytes(StandardCharsets.UTF_8)
-    toScala(redisReactive.setex(key, 5, data).toFuture)
+    val redisFuture = asyncCmds.setex(key, 20, data)
+    val p = Promise[Unit]()
+    redisFuture.thenAccept(_ => p.success(()))
+      .exceptionally(ex => { p.failure(ex); null })
+    p.future
   }
 
-  // built-in grouping aggregator
-  val aggregatorFlow = Flow[(String, (Int, Double))]
-    .groupBy(1024, _._1)
-    .groupedWithin(neuronCount, 60.seconds)
-    .filter(_.size == neuronCount)
-    .map { batch =>
-      val id = batch.head._1
-      val arr = Array.fill[Double](neuronCount)(0.0)
-      batch.foreach { case (_, (nid, v)) => arr(nid) = v }
-      (id, arr)
-    }
-    .mergeSubstreams
+  // Aggregation + offset-batching stage
+  val aggregateStage =
+    Flow[(String, (Int, Double), ConsumerMessage.CommittableOffset)]
+      .statefulMapConcat { () =>
+        val buf    = mutable.Map.empty[String, Array[Double]]
+        val counts = mutable.Map.empty[String, Int]
+        val offsets = mutable.Map.empty[String, ConsumerMessage.CommittableOffsetBatch]
+        elem => {
+          val (id, (nid, v), offset) = elem
+          val arr = buf.getOrElseUpdate(id, Array.ofDim[Double](neuronCount))
+          arr(nid) = v
+          val cnt = counts.getOrElse(id, 0) + 1
+          counts.update(id, cnt)
+          val batch = offsets.get(id) match {
+            case Some(b) => b.updated(offset)
+            case None    => ConsumerMessage.CommittableOffsetBatch.empty.updated(offset)
+          }
+          offsets.update(id, batch)
 
-  // Kafka settings
+          if (cnt == neuronCount) {
+            buf.remove(id); counts.remove(id); offsets.remove(id)
+            List((id, arr, batch))
+          } else Nil
+        }
+      }
+
+  // Kafka consumer & producer settings
   val consumerSettings = ConsumerSettings(system, new StringDeserializer, new StringDeserializer)
     .withBootstrapServers("localhost:9092")
-    .withGroupId("streams-0-group")
-    .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest")
-    .withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true")
-    .withProperty(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, "500")
-    .withProperty(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, "1048576")
-    .withProperty(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "50")
-    .withProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "5000")
+    .withGroupId("streams-0-opt-group")
+    .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,  "latest")
+    .withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false")
+    .withProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG,   "10000")
+    .withProperty(ConsumerConfig.FETCH_MIN_BYTES_CONFIG,    "1048576")
+    .withProperty(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG,  "100")
 
   val producerSettings = ProducerSettings(system, new StringSerializer, new StringSerializer)
     .withBootstrapServers("localhost:9092")
-    .withProperty(ProducerConfig.LINGER_MS_CONFIG, "5")
-    .withProperty(ProducerConfig.BATCH_SIZE_CONFIG, "256000")
-    .withProperty(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4")
-    .withProperty(ProducerConfig.ACKS_CONFIG, "1")
+    .withProperty(ProducerConfig.LINGER_MS_CONFIG,          "10")
+    .withProperty(ProducerConfig.BATCH_SIZE_CONFIG,         "512000")
+    .withProperty(ProducerConfig.COMPRESSION_TYPE_CONFIG,   "lz4")
+    .withProperty(ProducerConfig.ACKS_CONFIG,               "1")
 
-  // Build & run the stream
   Consumer
-    .plainSource(consumerSettings, Subscriptions.topics("layer-0-streams"))
+    .committableSource(consumerSettings, Subscriptions.topics("layer-0-streams"))
     .map { msg =>
-      val Array(nStr, vStr) = msg.value().split("\\|", 2)
-      (msg.key(), (nStr.toInt, vStr.toDouble))
+      val Array(nStr, vStr) = msg.record.value.split("\\|", 2)
+      (msg.record.key, (nStr.toInt, vStr.toDouble), msg.committableOffset)
     }
-    .via(aggregatorFlow)
-    .mapAsyncUnordered(64) { case (id, arr) =>
-      writeReactive(id, serialize(arr)).map(_ => id)
+    .via(aggregateStage)
+    .mapAsyncUnordered(64) { case (id, arr, batch) =>
+      withPermit(writeRedis(id, serialize(arr))).map(_ => (id, batch))(ec)
     }
-    .map { id => new ProducerRecord[String, String]("layer-1", id, id) }
-    .runWith(Producer.plainSink(producerSettings))
-    .onComplete {
-      case _ =>
-        connection.close()
-        redisClient.shutdown()
-        system.terminate()
+    .map { case (id, batch) =>
+      ProducerMessage.single(
+        new ProducerRecord[String, String]("layer-1", id, id),
+        batch
+      )
+    }
+    .via(Producer.flexiFlow(producerSettings))
+    .mapAsync(parallelism = 4)(_.passThrough.commitScaladsl())
+    .runWith(Sink.ignore)
+    .onComplete { _ =>
+      redisClient.shutdown(); system.terminate()
     }
 }
