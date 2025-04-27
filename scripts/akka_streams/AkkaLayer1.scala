@@ -4,10 +4,11 @@ import akka.actor.ActorSystem
 import akka.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
 import akka.kafka.scaladsl.{Consumer, Producer}
 import akka.stream.{ActorMaterializer, Materializer}
-import akka.stream.scaladsl.{Flow, Sink}
+import akka.stream.scaladsl.Flow
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.{ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
+import scala.concurrent.duration._
 
 import scala.concurrent.ExecutionContext
 
@@ -42,7 +43,8 @@ object AkkaLayer1 extends App {
     Flow[(String, (Int, Double))]
       // up to 1024 concurrent imageIds in flight
       .groupBy(1024, _._1)
-      .sliding(neuronCount, neuronCount)
+      .groupedWithin(neuronCount, 60.seconds)
+      .filter(_.size == neuronCount)
       .map { batch =>
         val id = batch.head._1
         val arr = Array.fill[Double](neuronCount)(0.0)
@@ -64,12 +66,10 @@ object AkkaLayer1 extends App {
   Consumer
     .plainSource(consumerSettings, Subscriptions.topics("layer-1-streams"))
     .map { msg =>
-      // parse "neuronId|value"
       val Array(idStr, vStr) = msg.value().split("\\|", 2)
       (msg.key(), (idStr.toInt, vStr.toDouble))
     }
     .via(aggregatorFlow)
-    // optionally break fusion boundary
     .async
     .via(predictionFlow)
     .runWith(Producer.plainSink(producerSettings))

@@ -17,6 +17,7 @@ import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets
 import scala.concurrent.{ExecutionContext, Future}
 import scala.compat.java8.FutureConverters._
+import scala.concurrent.duration._
 
 object AkkaLayer0 extends App {
   implicit val system: ActorSystem = ActorSystem("streams-0")
@@ -47,13 +48,14 @@ object AkkaLayer0 extends App {
 
   private def writeReactive(id: String, data: Array[Byte]): Future[String] = {
     val key = s"0_$id".getBytes(StandardCharsets.UTF_8)
-    toScala(redisReactive.setex(key, 5, data).toFuture())
+    toScala(redisReactive.setex(key, 5, data).toFuture)
   }
 
   // built-in grouping aggregator
   val aggregatorFlow = Flow[(String, (Int, Double))]
     .groupBy(1024, _._1)
-    .sliding(neuronCount, neuronCount)
+    .groupedWithin(neuronCount, 60.seconds)
+    .filter(_.size == neuronCount)
     .map { batch =>
       val id = batch.head._1
       val arr = Array.fill[Double](neuronCount)(0.0)
@@ -89,7 +91,6 @@ object AkkaLayer0 extends App {
     }
     .via(aggregatorFlow)
     .mapAsyncUnordered(64) { case (id, arr) =>
-      // writeReactive returns status ("OK"); map back to id so downstream sees the imageId
       writeReactive(id, serialize(arr)).map(_ => id)
     }
     .map { id => new ProducerRecord[String, String]("layer-1", id, id) }
