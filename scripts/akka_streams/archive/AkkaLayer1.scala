@@ -1,20 +1,17 @@
 package app
 
 import java.util.concurrent.TimeUnit
-
 import akka.{Done, NotUsed}
 import akka.actor.{ActorSystem, Cancellable}
 import akka.event.Logging
-import akka.dispatch.MessageDispatcher
 import akka.kafka.{ConsumerSettings, Subscriptions}
 import akka.kafka.scaladsl.Consumer
-import akka.stream.{ActorAttributes, Materializer, OverflowStrategy, SystemMaterializer}
+import akka.stream._
 import akka.stream.alpakka.s3.scaladsl.S3
-import akka.stream.alpakka.s3.{AccessStyle, MemoryBufferType, MultipartUploadResult, S3Attributes, S3Settings}
+import akka.stream.alpakka.s3.{AccessStyle, MemoryBufferType, S3Attributes, S3Settings}
 import akka.stream.scaladsl._
 import akka.util.ByteString
 import com.github.benmanes.caffeine.cache.Caffeine
-import com.typesafe.config.ConfigFactory
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.StringDeserializer
 import software.amazon.awssdk.auth.credentials.{AwsBasicCredentials, StaticCredentialsProvider}
@@ -24,33 +21,14 @@ import software.amazon.awssdk.services.s3.S3AsyncClient
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success}
+import scala.util.Failure
 
 object AkkaLayer1 extends App {
-  // 1) INLINE CONFIG — dedicated dispatchers for Kafka & S3
-  val customConf = ConfigFactory.parseString("""
-    akka.actor.kafka-consumer-dispatcher {
-      type = Dispatcher
-      executor = "thread-pool-executor"
-      thread-pool-executor { fixed-pool-size = 16 }
-      throughput = 1
-    }
-    akka.actor.s3-dispatcher {
-      type = Dispatcher
-      executor = "thread-pool-executor"
-      thread-pool-executor { fixed-pool-size = 8 }
-      throughput = 1
-    }
-  """).withFallback(ConfigFactory.load())
-
-  implicit val system: ActorSystem      = ActorSystem("streams-s3", customConf)
+  // — ActorSystem & Materializer —
+  implicit val system: ActorSystem      = ActorSystem("streams-s3")
   implicit val ec: ExecutionContext     = system.dispatcher
   implicit val mat: Materializer        = Materializer(system)
   private val log = Logging(system, getClass)
-
-  // dispatchers for Futures
-  private val kafkaEc: ExecutionContext = system.dispatchers.lookup("akka.actor.kafka-consumer-dispatcher")
-  private val s3Ec:   ExecutionContext  = system.dispatchers.lookup("akka.actor.s3-dispatcher")
 
   // — Business settings —
   val neuronCount = 10
@@ -83,11 +61,11 @@ object AkkaLayer1 extends App {
     Source.tick(200.millis, 200.millis, ())
       .map(_ => ("__heartbeat__", Array.ofDim[Double](neuronCount)))
 
-  // — 3) Kafka settings (auto-commit), we’ll pin polling via ActorAttributes below —
+  // — 3) Kafka settings (auto-commit enabled) —
   val consumerSettings = ConsumerSettings(system, new StringDeserializer, new StringDeserializer)
     .withBootstrapServers("localhost:9092")
     .withGroupId("streams-1-opt")
-    .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,       "latest")
+    .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,        "latest")
     .withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG,      "true")
     .withProperty(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, "5000")
     .withProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG,        "50000")
@@ -117,15 +95,12 @@ object AkkaLayer1 extends App {
       .withAccessStyle(AccessStyle.PathAccessStyle)
       .withBufferType(MemoryBufferType)
 
-  // — 5) Source: Kafka → parse (on kafkaEc) → aggregate → heartbeat → CSV lines —
+  // — 5) Source: Kafka → aggregate → heartbeat → ByteString CSV lines —
   val source: Source[ByteString, Consumer.Control] =
     Consumer.plainSource(consumerSettings, Subscriptions.topics("layer-1-streams"))
-      .withAttributes(ActorAttributes.dispatcher("akka.actor.kafka-consumer-dispatcher"))
-      .mapAsync(1) { msg =>
-        Future {
-          val Array(nStr, vStr) = msg.value.split("\\|", 2)
-          (msg.key(), (nStr.toInt, vStr.toDouble))
-        }(kafkaEc)
+      .map { msg =>
+        val Array(nStr,vStr) = msg.value.split("\\|",2)
+        (msg.key, (nStr.toInt, vStr.toDouble))
       }
       .via(aggregateStage)
       .merge(heartbeat)
@@ -133,32 +108,33 @@ object AkkaLayer1 extends App {
         ByteString(s"$id,${arr.indices.maxBy(i => arr(i))}\n")
       }
 
-  // — 6) Sink: chunk → multipart uploads in parallel on s3Ec, dropping Consumer.Control →
+  // — 6) Sink: chunk → prepend header → parallel multipart uploads (error-only logging) —
   val parallelism = 4
   val keyPrefix   = "predictions/part"
 
-  val uploads: Source[MultipartUploadResult, NotUsed] =
-    source
-      .groupedWithin(500, 3.minutes)
-      .zipWithIndex
-      .async
-      .mapAsyncUnordered(parallelism) { case (chunk, idx) =>
-        Future {
-          val key    = f"$keyPrefix-${idx + 1}%05d.csv"
-          val header = ByteString("image_i,prediction\n")
-          val rows   = Source.single(header) ++ Source(chunk.toList)
-          val sink   = S3.multipartUpload(bucket, key)
-            .withAttributes(S3Attributes.settings(s3Settings))
+  val done: Future[Done] = source
+    .groupedWithin(500, 3.minutes)    // Seq[ByteString]
+    .zipWithIndex                      // (Seq, idx)
+    .mapAsyncUnordered(parallelism) { case (chunk, idx) =>
+      val key  = f"$keyPrefix-${idx + 1}%05d.csv"
+      val header = ByteString("image_i,prediction\n")
+      val rows   = Source.single(header) ++ Source(chunk.toList)
+      val sink   = S3.multipartUpload(bucket, key)
+        .withAttributes(S3Attributes.settings(s3Settings))
 
-          rows.runWith(sink)
-        }(s3Ec).flatMap(identity)(s3Ec)
-      }
-      .mapMaterializedValue(_ => NotUsed)
+      rows
+        .runWith(sink)
+        .map(_ => Done)
+        .andThen {
+          case Failure(ex) =>
+            log.error(ex, s"Upload FAILED: $key")
+        }
+    }
+    .runWith(Sink.ignore)
 
-  // — 7) Materialize & shutdown —
-  val done: Future[Done] = uploads.runWith(Sink.ignore)
+  // — Shutdown on completion or failure —
   done.onComplete {
-    case Success(_) =>
+    case scala.util.Success(_)  =>
       log.info("All uploads complete, shutting down.")
       system.terminate()
     case Failure(ex) =>
