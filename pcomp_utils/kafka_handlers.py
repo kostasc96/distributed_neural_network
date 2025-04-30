@@ -11,7 +11,7 @@ class KafkaProducerHandler:
             'bootstrap.servers': server,
             'linger.ms': 5,
             'batch.size': 256000,
-            'queue.buffering.max.ms': 100,
+            'queue.buffering.max.ms': 5,
             'queue.buffering.max.messages': 1000000,
             'compression.type': 'lz4',
             'enable.idempotence': True,

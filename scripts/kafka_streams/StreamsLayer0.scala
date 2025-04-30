@@ -1,165 +1,162 @@
 package app
 
+import java.io.File
+import java.nio.{ByteBuffer, ByteOrder}
+import java.nio.charset.StandardCharsets
+import java.time.Duration
+import java.util.Properties
+import io.lettuce.core.{RedisClient, RedisURI}
+import io.lettuce.core.api.async.RedisAsyncCommands
+import io.lettuce.core.codec.ByteArrayCodec
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
+import org.apache.kafka.common.serialization.Serdes
+import org.apache.kafka.streams.kstream.ValueTransformerWithKey
+import org.apache.kafka.streams.{KafkaStreams, StreamsConfig}
 import org.apache.kafka.streams.scala._
-import org.apache.kafka.streams.scala.kstream._
-import org.apache.kafka.streams.state.{KeyValueStore, Stores}
-import org.apache.kafka.streams.kstream.{ValueTransformerWithKey, ValueTransformerWithKeySupplier}
-import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
+import org.apache.kafka.streams.scala.serialization.Serdes._
 import org.apache.kafka.streams.scala.ImplicitConversions._
-import org.apache.kafka.streams.scala.Serdes._
-import redis.clients.jedis.{Jedis, JedisPool, JedisPoolConfig}
+import org.apache.kafka.streams.state.{KeyValueStore, Stores}
 
-import java.io.File
-import java.nio.ByteBuffer
-import java.util.Properties
+/**
+ * Optimized Kafka Streams application mirroring Akka Streams logic,
+ * with idempotent emission only upon first complete vector per image ID.
+ */
+object StreamsLayer0 extends App {
+  val neuronCount      = 128
+  val inputTopic       = "layer-0-streams"
+  val outputTopic      = "layer-1"
+  val stateStoreName   = "image-neuron-store"
 
-object StreamsLayer0 {
+  // Redis setup
+  private val redisClient = RedisClient.create(
+    RedisURI.Builder.redis("localhost", 6379)
+      .withTimeout(Duration.ofSeconds(5)).build()
+  )
+  def newAsyncRedis(): RedisAsyncCommands[Array[Byte], Array[Byte]] =
+    redisClient.connect(ByteArrayCodec.INSTANCE).async()
 
-  val neuronCount: Int = 128
-  val stateStoreName: String = "image-neuron-store"
-  val poolConfig = new JedisPoolConfig()
-  poolConfig.setMaxTotal(15)
-  val redisPool = new JedisPool(poolConfig, "localhost", 6379, 5000, null, false)
-
+  // State serialization helpers
   case class NeuronCollector(values: Array[Double], var count: Int)
 
-  def main(args: Array[String]): Unit = {
-    val builder = new StreamsBuilder()
-
-    val storeBuilder = Stores.keyValueStoreBuilder(
-      Stores.persistentKeyValueStore(stateStoreName),
-      Serdes.String,
-      Serdes.ByteArray
-    )
-    builder.addStateStore(storeBuilder)
-
-    val sourceStream: KStream[String, String] = builder.stream[String, String]("layer-0-streams")
-
-    val processedStream = sourceStream
-      .transformValues(new ValueTransformerWithKeySupplier[String, String, String] {
-        override def get(): ValueTransformerWithKey[String, String, String] =
-          new ValueTransformerWithKey[String, String, String] {
-            private var stateStore: KeyValueStore[String, Array[Byte]] = _
-            private var jedis: Jedis = _  // ✅ Keep per-transformer Redis connection
-
-            override def init(context: org.apache.kafka.streams.processor.ProcessorContext): Unit = {
-              stateStore = context.getStateStore(stateStoreName).asInstanceOf[KeyValueStore[String, Array[Byte]]]
-              jedis = redisPool.getResource
-            }
-
-            override def transform(imageId: String, value: String): String = {
-              val sepIdx = value.indexOf('|')
-              if (sepIdx == -1) return null
-
-              val neuronId = value.substring(0, sepIdx).toInt
-              val data = value.substring(sepIdx + 1).toDouble
-
-              if (neuronId < 0 || neuronId >= neuronCount) return null
-
-              val collector = Option(stateStore.get(imageId)) match {
-                case Some(bytes) => deserializeCollector(bytes)
-                case None        => NeuronCollector(new Array[Double](neuronCount), 0)
-              }
-
-              if (collector.values(neuronId) == 0.0d) {
-                collector.values(neuronId) = data
-                collector.count += 1
-              }
-
-              if (collector.count >= neuronCount) {
-                jedis.setex(s"0_$imageId".getBytes(), 5, serializeDoubleArray(collector.values))
-                stateStore.delete(imageId)
-                imageId
-              } else {
-                stateStore.put(imageId, serializeCollector(collector))
-                null
-              }
-            }
-
-            override def close(): Unit = {
-              if (jedis != null) {
-                jedis.close()
-              }
-            }
-          }
-      }, stateStoreName)
-      .filter((_, value) => value != null)
-
-    processedStream.to("layer-1")
-
-    val topology: Topology = builder.build()
-
-    val props = new Properties()
-    props.put(StreamsConfig.APPLICATION_ID_CONFIG, "streams-layer0-app")
-    props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
-    props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest")
-    props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, "5000")
-    props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, "10")
-    props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, (64*1024*1024).toString)
-
-    props.put(ProducerConfig.BATCH_SIZE_CONFIG, "131072")
-    props.put(ProducerConfig.LINGER_MS_CONFIG, "50")
-    props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4")
-
-    props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG,    "1048576")
-    props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG,  "100")
-
-    props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.Serdes.StringSerde])
-    props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.Serdes.StringSerde])
-
-    cleanLocalState("streams-layer0-app")
-
-    val streams = new KafkaStreams(topology, props)
-    streams.start()
-
-    sys.addShutdownHook {
-      streams.close()
-      redisPool.close()
-    }
+  private def serializeCollector(c: NeuronCollector): Array[Byte] = {
+    val buf = ByteBuffer.allocate(4 + c.values.length * 8).order(ByteOrder.LITTLE_ENDIAN)
+    buf.putInt(c.count)
+    c.values.foreach(buf.putDouble)
+    buf.array()
   }
 
-  def serializeCollector(collector: NeuronCollector): Array[Byte] = {
-    val buffer = ByteBuffer.allocate(4 + collector.values.length * 8)
-    buffer.order(java.nio.ByteOrder.LITTLE_ENDIAN) // ✅ Match Redis + Python
-
-    buffer.putInt(collector.count)
-    collector.values.foreach(buffer.putDouble)
-    buffer.array()
+  private def serializePayload(arr: Array[Double]): Array[Byte] = {
+    val buf = ByteBuffer.allocate(arr.length * java.lang.Double.BYTES).order(ByteOrder.LITTLE_ENDIAN)
+    arr.foreach(buf.putDouble)
+    buf.array()
   }
 
-  def deserializeCollector(bytes: Array[Byte]): NeuronCollector = {
-    val buffer = ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-    val count = buffer.getInt
-    val values = new Array[Double](neuronCount)
-    var i = 0
-    while (i < neuronCount) {
-      values(i) = buffer.getDouble
-      i += 1
-    }
-    NeuronCollector(values, count)
-  }
+  // Build topology
+  val builder = new StreamsBuilder()
 
-  def serializeDoubleArray(values: Array[Double]): Array[Byte] = {
-    val buffer = ByteBuffer.allocate(values.length * java.lang.Double.BYTES)
-    buffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-    values.foreach(buffer.putDouble)
-    buffer.array()
-  }
+  // In-memory state store (no changelog)
+  builder.addStateStore(
+    Stores.keyValueStoreBuilder(
+      Stores.inMemoryKeyValueStore(stateStoreName),
+      stringSerde,
+      byteArraySerde
+    ).withLoggingDisabled()
+  )
+
+  builder
+    .stream[String, String](inputTopic)
+    .transformValues(() => new ValueTransformerWithKey[String, String, String] {
+      private var store: KeyValueStore[String, Array[Byte]] = _
+      private var redisAsync: RedisAsyncCommands[Array[Byte], Array[Byte]] = _
+
+      override def init(context: org.apache.kafka.streams.processor.ProcessorContext): Unit = {
+        store = context.getStateStore(stateStoreName).asInstanceOf[KeyValueStore[String, Array[Byte]]]
+        redisAsync = newAsyncRedis()
+      }
+
+      override def transform(id: String, v: String): String = {
+        // idempotency: if marked processed, skip
+        Option(store.get(id)).foreach { raw =>
+          val cnt = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).getInt()
+          if (cnt < 0) return null
+        }
+        // parse "idx|value"
+        val sep = v.indexOf('|')
+        if (sep < 0) return null
+        val idx = v.substring(0, sep).toInt
+        val dv  = v.substring(sep + 1).toDouble
+        if (idx < 0 || idx >= neuronCount) return null
+
+        // load or init collector
+        val (collector, count) = Option(store.get(id)).fold {
+          (NeuronCollector(new Array[Double](neuronCount), 0), 0)
+        } { raw =>
+          val buf = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+          val c   = buf.getInt()
+          val arr = Array.ofDim[Double](neuronCount)
+          var i = 0; while (i < neuronCount) { arr(i) = buf.getDouble(); i += 1 }
+          (NeuronCollector(arr, c), c)
+        }
+
+        if (collector.values(idx) == 0.0) {
+          collector.values(idx) = dv
+          collector.count += 1
+        }
+
+        if (collector.count >= neuronCount) {
+          // write to Redis
+          val keyBytes = s"0_$id".getBytes(StandardCharsets.UTF_8)
+          val payload  = serializePayload(collector.values)
+          redisAsync.setex(keyBytes, 20, payload)
+          // mark processed (count = -1)
+          store.delete(id)
+          id
+        } else {
+          // save partial collector
+          store.put(id, serializeCollector(collector))
+          null
+        }
+      }
+
+      override def close(): Unit = {
+        if (redisAsync != null) redisAsync.getStatefulConnection.close()
+      }
+    }, stateStoreName)
+    .filter((_, id) => id != null)
+    .to(outputTopic)
+
+  // Streams configuration
+  val props = new Properties()
+  props.put(StreamsConfig.APPLICATION_ID_CONFIG,       "streams-layer0-app")
+  props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG,    "localhost:9092")
+  props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,   "latest")
+  props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG,   "10")
+  props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, (64 * 1024 * 1024).toString)
+  props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG,    "5000")
+
+  props.put(ProducerConfig.BATCH_SIZE_CONFIG,           "131072")
+  props.put(ProducerConfig.LINGER_MS_CONFIG,            "10")
+  props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG,     "lz4")
+
+  props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG,      "1048576")
+  props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG,    "100")
+
+  props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG,   classOf[Serdes.StringSerde])
+  props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, classOf[Serdes.StringSerde])
 
   def cleanLocalState(appId: String): Unit = {
-    val localStateDir = new File(s"/tmp/kafka-streams/$appId")
-    if (localStateDir.exists()) {
-      println(s"[INFO] Cleaning up local RocksDB state at ${localStateDir.getAbsolutePath}")
-      deleteRecursively(localStateDir)
-    }
+    val dir = new File(s"/tmp/kafka-streams/$appId")
+    if (dir.exists()) deleteRecursively(dir)
   }
+  def deleteRecursively(f: File): Unit = if (f.isDirectory) f.listFiles().foreach(deleteRecursively) else f.delete()
 
-  private def deleteRecursively(file: File): Unit = {
-    if (file.isDirectory) {
-      file.listFiles().foreach(deleteRecursively)
-    }
-    file.delete()
+  // start
+  cleanLocalState(props.getProperty(StreamsConfig.APPLICATION_ID_CONFIG))
+  val streams = new KafkaStreams(builder.build(), props)
+  streams.start()
+  sys.addShutdownHook {
+    streams.close()
+    redisClient.shutdown()
   }
 }
