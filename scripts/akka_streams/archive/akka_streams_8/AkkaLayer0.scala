@@ -95,7 +95,7 @@ akka.stream.materializer.max-input-buffer-size = 256
 
   val producerSettings = ProducerSettings(system, new StringSerializer, new StringSerializer)
     .withBootstrapServers("localhost:9092")
-    .withProperty(ProducerConfig.LINGER_MS_CONFIG, "5")
+    .withProperty(ProducerConfig.LINGER_MS_CONFIG, "10")
     .withProperty(ProducerConfig.BATCH_SIZE_CONFIG, "2097152") // 2 MB
     .withProperty(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4")
     .withProperty(ProducerConfig.ACKS_CONFIG, "1")
