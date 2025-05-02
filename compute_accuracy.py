@@ -15,11 +15,11 @@ def main():
     labels = pd.read_csv(response)
 
     # 3. Read and concatenate all CSVs in 'predictions/' folder
-    objects = client.list_objects('my-bucket', prefix='predictions/')
+    objects = client.list_objects('faasnn-bucket', prefix='predictions/')
     dfs = []
     for obj in objects:
         if obj.object_name.endswith('.csv'):
-            resp = client.get_object('my-bucket', obj.object_name)
+            resp = client.get_object('faasnn-bucket', obj.object_name)
             dfs.append(pd.read_csv(resp))
     predictions = pd.concat(dfs, ignore_index=True)
 
