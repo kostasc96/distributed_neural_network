@@ -1,9 +1,9 @@
 docker build -f Dockerfile -t streams_final:latest .
 
 
-docker run --d \
+docker run -d \
   --name streams-final \
-  --network kafka_docker_kafka_network \
+  --network kafka_docker_kafka-network \
   -e KAFKA_BOOTSTRAP_SERVERS="host.docker.internal:29092" \
   -e REDIS_URI="redis://host.docker.internal:6379" \
   -e S3_ENDPOINT_URL="http://host.docker.internal:9000" \
@@ -15,7 +15,7 @@ docker run --d \
 
 docker run -d \
   --name streams-intermediate \
-  --network kafka_docker_kafka_network \
+  --network kafka_docker_kafka-network \
   -e KAFKA_BOOTSTRAP_SERVERS="kafka:29092" \
   -e REDIS_URI="redis://host.docker.internal:6379" \
   streams_intermediate:latest
