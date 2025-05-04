@@ -17,6 +17,7 @@ for layer_id, layer_content in model.items():
 
     # Reset per-layer neuron counter
     neuron_counter = 0
+    neurons_num = len(layer_content.get('nodes', []))
 
     for node in layer_content.get('nodes', []):
         neurons.append({
@@ -26,7 +27,8 @@ for layer_id, layer_content in model.items():
             "neuron_id": str(neuron_counter),
             "weights": str(node.get("weights")),
             "bias": str(node.get("biases")),
-            "activation": node.get("activation")
+            "activation": node.get("activation"),
+            "neuron_count": str(neurons_num)
         })
         neuron_counter += 1
 
