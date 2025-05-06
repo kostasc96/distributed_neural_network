@@ -2,8 +2,9 @@ package app
 
 import akka.actor.ActorSystem
 import akka.kafka.scaladsl.{Committer, Consumer, Producer}
-import akka.kafka.{CommitterSettings, ConsumerSettings, ProducerMessage, ProducerSettings, Subscriptions}
+import akka.kafka.{CommitterSettings, ConsumerSettings, ProducerSettings, Subscriptions}
 import akka.kafka.ConsumerMessage.CommittableOffset
+import akka.kafka.ProducerMessage
 import akka.stream.{ActorAttributes, KillSwitches, Materializer, SystemMaterializer}
 import akka.stream.scaladsl.{Keep, Sink}
 import com.typesafe.config.ConfigFactory
@@ -21,16 +22,18 @@ import scala.concurrent.duration._
 import java.nio.{ByteBuffer, ByteOrder}
 
 object AkkaLayer0 extends App {
-  // === Config & System ===
+  // === 1) Config & System ===
   val config = ConfigFactory.load()
-  implicit val system: ActorSystem  = ActorSystem("streams-intermediate", config)
-  implicit val mat: Materializer    = SystemMaterializer(system).materializer
-  // Dispatcher for compute-heavy stages (Producer)
-  implicit val computeDispatcher: ExecutionContext = system.dispatchers.lookup("akka.actor.compute-dispatcher")
-  // Dispatcher for Redis operations
-  val redisDispatcher: ExecutionContext = system.dispatchers.lookup("akka.actor.redis-dispatcher")
+  implicit val system: ActorSystem = ActorSystem("streams-intermediate", config)
+  implicit val mat: Materializer   = SystemMaterializer(system).materializer
 
-  // === Redis + Lua script setup ===
+  // Use dedicated dispatchers
+  implicit val computeDispatcher: ExecutionContext =
+    system.dispatchers.lookup("akka.actor.compute-dispatcher")
+  val redisDispatcher: ExecutionContext =
+    system.dispatchers.lookup("akka.actor.redis-dispatcher")
+
+  // === 2) Redis + Lua script setup ===
   val redisUri    = sys.env("REDIS_URI")
   val neuronCount = config.getInt("akka.stream.neuron-count")
   val redisTtlSec = config.getInt("akka.stream.redis-ttl-sec")
@@ -38,18 +41,17 @@ object AkkaLayer0 extends App {
   val asyncConn: RedisAsyncCommands[Array[Byte], Array[Byte]] =
     client.connect(ByteArrayCodec.INSTANCE).async()
 
+  // Convert Lettuce RedisFuture to Scala Future
   private def toScala[T](rf: RedisFuture[T]): Future[T] = {
     val p = Promise[T]()
-    // Register callback to complete the promise
     rf.whenComplete(new java.util.function.BiConsumer[T, Throwable] {
-      override def accept(res: T, err: Throwable): Unit = {
-        if (err != null) p.failure(err)
-        else p.success(res)
-      }
+      override def accept(res: T, err: Throwable): Unit =
+        if (err != null) p.failure(err) else p.success(res)
     })
     p.future
   }
 
+  // Lua for atomic SETRANGE + INCRBY + cleanup
   private val luaScript =
     s"""
        |local dataKey = KEYS[1]
@@ -68,15 +70,22 @@ object AkkaLayer0 extends App {
        |end
        |""".stripMargin
 
+  // Load script SHA
   private val scriptSha: String =
     Await.result(toScala(asyncConn.scriptLoad(luaScript)), 30.seconds)
 
-  def doubleBytes(d: Double): Array[Byte] = {
+  // Convert Double to little-endian bytes
+  private def doubleBytes(d: Double): Array[Byte] = {
     val buf = ByteBuffer.allocate(java.lang.Double.BYTES).order(ByteOrder.LITTLE_ENDIAN)
     buf.putDouble(d).array()
   }
 
-  def updateStateAsync(id: String, offset: Long, bytes: Array[Byte]): Future[Boolean] = {
+  // Atomic Redis update
+  private def updateStateAsync(
+                                id: String,
+                                offset: Long,
+                                bytes: Array[Byte]
+                              ): Future[Boolean] = {
     val dataKey = s"0_$id".getBytes
     val cntKey  = s"cnt:0:$id".getBytes
     val rf: RedisFuture[java.lang.Long] = asyncConn.evalsha(
@@ -90,7 +99,7 @@ object AkkaLayer0 extends App {
     toScala(rf).map(_ == 1L)(redisDispatcher)
   }
 
-  // === Kafka settings ===
+  // === 3) Kafka settings ===
   val inputTopic   = config.getString("myapp.kafka.input-topic")
   val outputTopic  = config.getString("myapp.kafka.output-topic")
   val bootstrap    = sys.env("KAFKA_BOOTSTRAP_SERVERS")
@@ -98,7 +107,7 @@ object AkkaLayer0 extends App {
   val consumerSettings = ConsumerSettings(system, new StringDeserializer, new StringDeserializer)
     .withBootstrapServers(bootstrap)
     .withGroupId("akka-streams0-group")
-    .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest")
+    .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
 
   val producerSettings = ProducerSettings(system, new StringSerializer, new StringSerializer)
     .withBootstrapServers(bootstrap)
@@ -107,27 +116,36 @@ object AkkaLayer0 extends App {
     .withMaxBatch(50)
     .withMaxInterval(2.seconds)
 
-  // === Stream ===
+  // === 4) Stream with micro-batch 50 @ 100ms ===
   Consumer
     .committableSource(consumerSettings, Subscriptions.topics(inputTopic))
     .withAttributes(ActorAttributes.dispatcher("akka.actor.kafka-consumer-dispatcher"))
     .viaMat(KillSwitches.single)(Keep.right)
-    .mapAsyncUnordered(parallelism = config.getInt("akka.stream.parallelism"))(msg => {
-      val v     = msg.record.value()
-      val sep   = v.indexOf('|')
-      val id    = msg.record.key()
-      val idx   = v.substring(0, sep).toLong
-      val dbl   = v.substring(sep + 1).toDouble
-      val bytes = doubleBytes(dbl)
-      updateStateAsync(id, idx * 8L, bytes).map {
-        case true  => Some(ProducerMessage.single(new ProducerRecord[String, String](outputTopic, id, id), msg.committableOffset))
-        case false => None
-      }(computeDispatcher)
-    })
-    .withAttributes(ActorAttributes.dispatcher("akka.actor.redis-dispatcher"))
-    .collect { case Some(env) => env }
-    .via(Producer.flexiFlow(producerSettings)
-      .withAttributes(ActorAttributes.dispatcher("akka.actor.compute-dispatcher")))
+    .groupedWithin(50, 100.milliseconds)
+    .mapAsyncUnordered(config.getInt("akka.stream.parallelism")) { batch =>
+      Future.traverse(batch) { msg =>
+        val v     = msg.record.value()
+        val sep   = v.indexOf('|')
+        val id    = msg.record.key()
+        val idx   = v.substring(0, sep).toLong
+        val dbl   = v.substring(sep + 1).toDouble
+        val bytes = doubleBytes(dbl)
+        updateStateAsync(id, idx * 8L, bytes).map {
+          case true  => Some(
+            ProducerMessage.single(
+              new ProducerRecord[String, String](outputTopic, id, id),
+              msg.committableOffset
+            )
+          )
+          case false => None
+        }
+      }.map(_.flatten)
+    }
+    .mapConcat(identity)
+    .via(
+      Producer.flexiFlow(producerSettings)
+        .withAttributes(ActorAttributes.dispatcher("akka.actor.compute-dispatcher"))
+    )
     .map {
       case res: ProducerMessage.Result[_, _, CommittableOffset] => res.passThrough
       case other => throw new IllegalStateException(s"Unexpected envelope: $other")
@@ -135,7 +153,7 @@ object AkkaLayer0 extends App {
     .toMat(Committer.sink(committerSettings))(Keep.both)
     .run()
 
-  // === Shutdown ===
+  // === 5) Shutdown ===
   sys.addShutdownHook {
     asyncConn.getStatefulConnection.close()
     client.shutdown()
