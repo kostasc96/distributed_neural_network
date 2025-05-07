@@ -1,5 +1,6 @@
 docker build -f Dockerfile -t streams_final:latest .
 docker build -f Dockerfile -t streams_intermediate:latest .
+docker build -f Dockerfile -t mirror_topics:latest .
 
 
 docker run -d \
@@ -24,3 +25,12 @@ docker run -d \
   -e KAFKA_BOOTSTRAP_SERVERS="kafka:29092" \
   -e REDIS_URI="redis://host.docker.internal:6379" \
   streams_intermediate:latest
+
+
+docker run -d \
+  --name mirror-topics \
+  --network kafka_docker_kafka-network \
+  --runtime=nvidia \
+  --gpus all \
+  -e KAFKA_BOOTSTRAP_SERVERS="kafka:29092" \
+  mirror_topics:latest
