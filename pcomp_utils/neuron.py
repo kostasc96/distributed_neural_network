@@ -8,7 +8,6 @@ from pcomp.redis_utils import RedisHandler
 
 
 class Neuron(threading.Thread):
-    IDLE_TIMEOUT = 60  # seconds
 
     def __init__(self, parameters, kafka_broker, redis_url, batch_size=50):
         threading.Thread.__init__(self)
@@ -28,6 +27,7 @@ class Neuron(threading.Thread):
         host, port = redis_url.split(":")
         self.redis_handler = RedisHandler(host, int(port), 0, 2)
         self.producer = None
+        self.consumer = None
         self.batch_size = batch_size
         self._input_buf = np.empty((self.batch_size, len_flat_weights), dtype=np.float64)
         self._z = np.empty(self.batch_size, dtype=np.float64)
@@ -56,7 +56,7 @@ class Neuron(threading.Thread):
 
     def run(self):
         # set up consumer and producer
-        consumer = KafkaConsumerHandler(
+        self.consumer = KafkaConsumerHandler(
             f'layer-{self.layer_id_num}',
             self.kafka_broker,
             group_id=f"{self.neuron_id}_{self.layer_id_num}_group"
@@ -66,18 +66,10 @@ class Neuron(threading.Thread):
             f'layer-{self.layer_id_num}-streams'
         )
 
-        last_msg_time = time.time()
         while True:
             # consume a batch of messages
-            msgs = consumer.consume(self.batch_size, timeout=0.2)
+            msgs = self.consumer.consume(self.batch_size, timeout=0.2)
             if not msgs:
-                # check for idle timeout
-                if time.time() - last_msg_time > self.IDLE_TIMEOUT:
-                    consumer.commit()
-                    consumer.close()
-                    self.producer.close()
-                    self.redis_handler.close()
-                    break
                 continue
             last_msg_time = time.time()
             image_ids = [int(msg.value().decode('utf-8')) for msg in msgs]
@@ -86,3 +78,9 @@ class Neuron(threading.Thread):
             inputs = self.fetch_input(image_ids, input_size)
             # batch compute and send
             self.process_and_send(image_ids, inputs, input_size)
+    
+    def close():
+        self.consumer.commit()
+        self.consumer.close()
+        self.producer.close()
+        self.redis_handler.close()

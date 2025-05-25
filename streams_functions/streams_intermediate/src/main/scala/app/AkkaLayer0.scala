@@ -1,6 +1,7 @@
 package app
 
-import akka.actor.ActorSystem
+import akka.Done
+import akka.actor.{ActorSystem, CoordinatedShutdown}
 import akka.kafka.scaladsl.{Committer, Consumer, Producer}
 import akka.kafka.{CommitterSettings, ConsumerSettings, ProducerSettings, Subscriptions}
 import akka.kafka.ConsumerMessage.CommittableOffset
@@ -116,8 +117,8 @@ object AkkaLayer0 extends App {
     .withMaxBatch(50)
     .withMaxInterval(2.seconds)
 
-  // === 4) Stream with micro-batch 50 @ 100ms ===
-  Consumer
+  // === 4) Stream with micro-batch and KillSwitch ===
+  val (killSwitch, streamDone) = Consumer
     .committableSource(consumerSettings, Subscriptions.topics(inputTopic))
     .withAttributes(ActorAttributes.dispatcher("akka.actor.kafka-consumer-dispatcher"))
     .viaMat(KillSwitches.single)(Keep.right)
@@ -153,10 +154,24 @@ object AkkaLayer0 extends App {
     .toMat(Committer.sink(committerSettings))(Keep.both)
     .run()
 
-  // === 5) Shutdown ===
+  // === 5) CoordinatedShutdown task: drain -> commit -> terminate ===
+  CoordinatedShutdown(system).addTask(
+    CoordinatedShutdown.PhaseServiceRequestsDone,
+    "drain-and-commit-stream"
+  ) { () =>
+    // stop pulling new messages
+    killSwitch.shutdown()
+    // wait until all in-flight messages are committed
+    streamDone.map { _ =>
+      system.log.info("Stream drained and all offsets committed.")
+      Done
+    }(computeDispatcher)
+  }
+
+  // === 6) JVM shutdown hook -> trigger CoordinatedShutdown ===
   sys.addShutdownHook {
     asyncConn.getStatefulConnection.close()
     client.shutdown()
-    system.terminate()
+    CoordinatedShutdown(system).run(CoordinatedShutdown.JvmExitReason)
   }
 }
