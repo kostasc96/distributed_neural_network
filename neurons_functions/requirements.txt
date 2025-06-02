@@ -1,0 +1,4 @@
+intel-numpy
+redis
+confluent-kafka
+flask

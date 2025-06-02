@@ -1,0 +1,10 @@
+# ignore everything
+**
+
+# but allow these
+!Dockerfile
+!requirements.txt
+!setup.py
+!pcomp_utils/
+!pcomp_utils/**
+!neuron_function.py
