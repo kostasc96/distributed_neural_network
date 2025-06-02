@@ -1,0 +1,18 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ${FUNCTION_ID}
+  namespace: functions-namespace
+spec:
+  template:
+    spec:
+      containers:
+        - image: registry.example.com/python-function:latest
+          env:
+            - name: FUNCTION_ID
+              value: "${FUNCTION_ID}"
+            - name: PARAMS
+              value: '${PARAMS_JSON}'
+          envFrom:
+            - secretRef:
+                name: function-env-secret
