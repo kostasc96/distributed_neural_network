@@ -1,0 +1,25 @@
+apiVersion: sources.knative.dev/v1
+kind: KafkaSource
+metadata:
+  name: autoscale-layer-1
+  namespace: knative-eventing
+  annotations:
+    autoscaling.knative.dev/class: keda.autoscaling.knative.dev
+    autoscaling.knative.dev/minScale: "0"
+    autoscaling.knative.dev/maxScale: "1"
+    keda.autoscaling.knative.dev/pollingInterval: "5"
+    keda.autoscaling.knative.dev/cooldownPeriod: "3600"
+    keda.autoscaling.knative.dev/kafkaActivationLagThreshold: "1"
+    keda.autoscaling.knative.dev/kafkaLagThreshold: "5"
+spec:
+  consumerGroup: autogroup-layer-1
+  bootstrapServers:
+    - kafka-test-broker
+  topics:
+    - layer-1-mock
+  initialOffset: earliest
+  sink:
+    ref:
+      apiVersion: eventing.knative.dev/v1
+      kind: Broker
+      name: kafka-broker

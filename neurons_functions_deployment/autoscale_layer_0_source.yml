@@ -1,0 +1,31 @@
+apiVersion: sources.knative.dev/v1
+kind: KafkaSource
+metadata:
+  name: autoscale-layer-0
+  namespace: knative-eventing
+  annotations:
+    # Use KEDA for scaling
+    autoscaling.knative.dev/class: keda.autoscaling.knative.dev
+    autoscaling.knative.dev/minScale: "0"
+    autoscaling.knative.dev/maxScale: "1"
+    # KEDA polling every 5s to detect new messages quickly
+    keda.autoscaling.knative.dev/pollingInterval: "5"
+    # Wait 60s of no lag before scaling to zero
+    keda.autoscaling.knative.dev/cooldownPeriod: "3600"
+    # Activate (0→1) as soon as there's 1 message
+    keda.autoscaling.knative.dev/kafkaActivationLagThreshold: "1"
+    # Aim for ~5 messages per dispatcher pod when scaling out
+    keda.autoscaling.knative.dev/kafkaLagThreshold: "5"
+spec:
+  consumerGroup: autogroup-layer-0
+  bootstrapServers:
+    - kafka-test-broker
+  topics:
+    - layer-0-mock
+  initialOffset: earliest
+  sink:
+    ref:
+      apiVersion: eventing.knative.dev/v1
+      kind: Broker
+      name: kafka-broker
+

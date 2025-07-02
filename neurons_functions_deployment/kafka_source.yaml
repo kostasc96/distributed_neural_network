@@ -1,0 +1,17 @@
+apiVersion: sources.knative.dev/v1
+kind: KafkaSource
+metadata:
+  name: kafka-source
+  namespace: default
+spec:
+  consumerGroup: knative-demo-group
+  bootstrapServers:
+    - kafka-test-broker
+  topics:
+    - layer-0-mock
+    - layer-1-mock
+  sink:
+    ref:
+      apiVersion: eventing.knative.dev/v1
+      kind: Broker
+      name: default
