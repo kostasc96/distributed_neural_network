@@ -11,7 +11,7 @@ with open(input_file, "r", encoding="utf-8") as file:
     content = file.read()
 
 # Δημιουργία του φακέλου αν δεν υπάρχει ήδη
-folder_path = "neuronYmlFolder"
+folder_path = "neuronFolder"
 os.makedirs(folder_path, exist_ok=True)
 
 

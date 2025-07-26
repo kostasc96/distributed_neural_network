@@ -1,8 +1,8 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: "neuron-0-0"
-  namespace: knative-serving
+  name: ${FUNCTION_ID}
+  namespace: faas-thesis
 spec:
   template:
     metadata:
@@ -11,32 +11,59 @@ spec:
         autoscaling.knative.dev/min-scale: "0"
         autoscaling.knative.dev/max-scale: "1"
         autoscaling.knative.dev/scale-to-zero-pod-retention-period: "1h"
+        autoscaling.knative.dev/initial-scale: "1"
+        serving.knative.dev/port: "5000"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - amd64
       containerConcurrency: 1
       containers:
-        - image: registry.example.com/python-function:latest
+        - image: kostasc96/neuron-function
+          resources:
+            limits:
+              cpu: "10m"
+            requests:
+              cpu: "10m"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 10
           env:
             - name: FUNCTION_ID
               value: "${FUNCTION_ID}"
-            - name: PARAMS
+            - name: PARAMETERS
               value: '${PARAMS_JSON}'
           envFrom:
             - secretRef:
-                name: function-env-secret
+                name: nn-faas-secret
 ---
+
 apiVersion: eventing.knative.dev/v1
 kind: Trigger
 metadata:
   name: ${FUNCTION_ID}-trigger
-  namespace: knative-eventing
+  namespace: faas-thesis
 spec:
   broker: kafka-broker
   filter:
     attributes:
       # exact source that KafkaSource emits for this topic:
-      source: "/apis/v1/namespaces/knative-eventing/kafkasources/${AUTOSCALER_ID}"
+      source: /apis/v1/namespaces/knative-eventing/kafkasources/${AUTOSCALER_ID}
   subscriber:
     ref:
       apiVersion: serving.knative.dev/v1
       kind: Service
-      name: "${FUNCTION_ID}"
+      name: ${FUNCTION_ID}
+      namespace: faas-thesis
